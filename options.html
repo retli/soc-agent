@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI SOC Chat 设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⚙️ AI SOC Chat 设置</h1>
+    </div>
+    
+    <div class="content">
+      <div id="successMessage" class="success-message">设置已保存！</div>
+      
+      <!-- AI API Configuration -->
+      <div class="section">
+        <h2 class="section-title">AI API 配置</h2>
+        
+        <div class="form-group">
+          <label for="apiUrl">API 地址</label>
+          <input type="url" id="apiUrl" placeholder="https://cnapi-t.bmw-brilliance.cn/aiplatform/llmplatformapimanagement/v1">
+          <div class="help-text">AI API 的基础地址</div>
+        </div>
+        
+        <div class="form-group">
+          <label for="apiKey">API Key</label>
+          <input type="text" id="apiKey" placeholder="eaf2f7a211864453b684713cfda569ad">
+          <div class="help-text">AI 服务的 API Key</div>
+        </div>
+        
+        <div class="form-group">
+          <label for="authorization">Authorization (可选)</label>
+          <input type="text" id="authorization" placeholder="ACCESSCODE XXXXXXX">
+          <div class="help-text">API 认证参数，格式：ACCESSCODE + 访问码</div>
+        </div>
+        
+        <div class="form-group">
+          <label for="modelName">模型名称</label>
+          <input type="text" id="modelName" placeholder="Qwen3">
+          <div class="help-text">AI模型名称（OpenAI格式）</div>
+        </div>
+        
+        <div class="form-group">
+          <label for="userId">用户 ID (可选)</label>
+          <input type="text" id="userId" placeholder="user-123">
+          <div class="help-text">用于标识用户，留空将自动生成</div>
+        </div>
+        
+        <div class="form-group">
+          <button class="btn btn-secondary" id="testApiBtn">测试 API 连接</button>
+          <div id="apiTestResult" style="margin-top: 8px; font-size: 13px;"></div>
+        </div>
+      </div>
+      
+      <!-- MCP Services Configuration -->
+      <div class="section">
+        <h2 class="section-title">MCP 服务配置</h2>
+        <div class="help-text" style="margin-bottom: 16px;">
+          配置第三方 MCP (Model Context Protocol) 服务，通过 SSE 格式提供额外的上下文信息
+        </div>
+        
+        <div id="mcpServicesList">
+          <!-- MCP services will be rendered here -->
+        </div>
+        
+        <button class="btn btn-secondary" id="addMcpBtn">+ 添加 MCP 服务</button>
+        
+        <div class="form-group" style="margin-top: 24px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <label style="margin: 0; font-weight: 600; color: #111827;">工具结果上下文</label>
+              <div class="help-text" style="margin-top: 4px;">将MCP工具执行结果带入后续对话，AI可基于历史工具数据回答（会增加Token消耗）</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="includeToolResults" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Data Management -->
+      <div class="section">
+        <h2 class="section-title">数据管理</h2>
+        
+        <div class="form-group">
+          <button class="btn btn-secondary" id="clearHistoryBtn" style="background-color: #ef4444; color: white;">
+            🗑️ 清空所有对话历史
+          </button>
+          <div class="help-text" style="margin-top: 8px; color: #ef4444;">
+            ⚠️ 此操作将删除所有对话记录，无法恢复
+          </div>
+        </div>
+      </div>
+
+      <!-- Advanced Features -->
+      <div class="section">
+        <h2 class="section-title">高级功能</h2>
+        
+        <div class="form-group">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <label style="margin: 0; font-weight: 600; color: #111827;">AI建议行动</label>
+              <div class="help-text" style="margin-top: 4px;">AI会在每次回复后，基于上下文提供1-3条建议的后续调查步骤，帮助扩展思路</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="enableSuggestedActions" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        
+        <div class="form-group" style="margin-top: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <label style="margin: 0; font-weight: 600; color: #111827;">建议自动发送</label>
+              <div class="help-text" style="margin-top: 4px;">点击建议后自动发送（关闭时仅填充到输入框，需手动发送）</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="autoSendSuggestions">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Development Mode -->
+      <div class="section">
+        <h2 class="section-title">开发者选项</h2>
+        
+        <div class="form-group">
+          <div class="dev-mode-toggle">
+            <div>
+              <label style="margin-bottom: 4px;">开发模式</label>
+              <div class="help-text">启用后将显示详细的调试日志</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="devModeToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group" id="logLevelGroup" style="display: none;">
+          <label for="logLevel">日志级别</label>
+          <select id="logLevel">
+            <option value="debug">Debug - 显示所有日志</option>
+            <option value="info" selected>Info - 显示信息和错误</option>
+            <option value="warn">Warn - 仅显示警告和错误</option>
+            <option value="error">Error - 仅显示错误</option>
+          </select>
+          <div class="help-text">控制控制台输出的日志详细程度</div>
+        </div>
+      </div>
+      
+      <div class="actions">
+        <button class="btn btn-primary" id="saveBtn">保存设置</button>
+        <button class="btn btn-secondary" id="resetBtn">重置</button>
+      </div>
+    </div>
+  </div>
+  
+  <script type="module" src="options.js"></script>
+</body>
+</html>

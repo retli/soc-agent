@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "AI SOC Chat Assistant",
+  "version": "1.0.0",
+  "description": "Chat with AI API and MCP services in a sidebar",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Toggle AI SOC Chat"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["sidebar.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "sidebar.html", 
+        "sidebar.css",
+        "sidebar.js",
+        "src/config/*.js",
+        "src/services/*.js",
+        "src/utils/*.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
