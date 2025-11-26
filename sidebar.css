@@ -681,177 +681,108 @@
 
 /* ===== ReAct 推理内容样式 ===== */
 
-/* 核心推理 (Thought) - 高亮显示，始终展开 */
-.react-thought {
-  margin: 12px 0;
-  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-  border-left: 4px solid #f59e0b;
-  border-radius: 8px;
-  padding: 12px;
-  box-shadow: 0 2px 4px rgba(245, 158, 11, 0.1);
-  animation: slideIn 0.3s ease-out;
-}
-
-.react-thought-header {
+.react-stack {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #92400e;
-  margin-bottom: 10px;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.react-thought-content {
-  color: #451a03;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.react-thought-content ul {
-  margin: 8px 0;
-  padding-left: 20px;
-}
-
-.react-thought-content li {
-  margin: 4px 0;
-}
-
-/* 工具观察 (Observation) - 低调显示，可折叠 */
-.react-observation {
-  margin: 10px 0;
-  background: #f9fafb;
-  border-left: 2px solid #d1d5db;
-  border-radius: 6px;
-  overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  animation: slideIn 0.3s ease-out;
-}
-
-.react-observation-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  cursor: pointer;
-  transition: background-color 0.2s ease;
-}
-
-.react-observation-header:hover {
-  background-color: #f3f4f6;
-}
-
-.react-observation-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #374151;
-}
-
-.react-observation-summary {
-  font-size: 11px;
-  color: #6b7280;
-  margin-left: 8px;
-  font-weight: 400;
-}
-
-.react-observation-toggle {
-  font-size: 10px;
-  color: #9ca3af;
-  transition: transform 0.3s ease;
-}
-
-.react-observation.expanded .react-observation-toggle {
-  transform: rotate(180deg);
-}
-
-.react-observation-content {
-  padding: 0 12px 12px 12px;
-  color: #4b5563;
-  font-size: 11px;
-  line-height: 1.5;
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.3s ease, padding 0.3s ease;
-}
-
-.react-observation.expanded .react-observation-content {
-  max-height: 2000px;
-  padding: 12px;
-}
-
-/* 最终结论 (Conclusion) - 强调显示，始终展开 */
-.react-conclusion {
-  margin: 12px 0;
-  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-  border-left: 4px solid #3b82f6;
-  border-radius: 8px;
-  padding: 12px;
-  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.1);
-  animation: slideIn 0.3s ease-out;
-}
-
-.react-conclusion-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #1e40af;
-  margin-bottom: 10px;
-}
-
-.react-conclusion-content {
-  color: #1e3a8a;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-/* 威胁等级标签 */
-.threat-level {
-  display: inline-block;
-  padding: 2px 8px;
+.react-card {
   border-radius: 12px;
+  padding: 14px 16px;
+  border-left: 4px solid transparent;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  animation: slideIn 0.2s ease-out;
+}
+
+.react-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #111827;
+}
+
+.react-card-icon {
+  font-size: 18px;
+}
+
+.react-card-title {
+  flex: 1;
+}
+
+.react-card-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1f2937;
+}
+
+.react-thought {
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  border-left-color: #3b82f6;
+}
+
+.react-acting {
+  background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
+  border-left-color: #8b5cf6;
+}
+
+.react-observation {
+  background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+  border-left-color: #10b981;
+}
+
+.react-conclusion {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-left-color: #f59e0b;
+}
+
+.react-section-active {
+  box-shadow: 0 6px 18px rgba(59, 130, 246, 0.35);
+}
+
+.react-action-summary {
+  color: #4c1d95;
+  margin-bottom: 8px;
+}
+
+.react-action-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.react-action-tools-label {
   font-size: 11px;
   font-weight: 600;
-  margin-left: 8px;
+  color: #6b21a8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
-.threat-level.low {
-  background: #d1fae5;
-  color: #065f46;
-}
-
-.threat-level.medium {
-  background: #fed7aa;
-  color: #92400e;
-}
-
-.threat-level.high {
-  background: #fecaca;
-  color: #991b1b;
-}
-
-.threat-level.critical {
-  background: #fecaca;
-  color: #7f1d1d;
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-
-/* ReAct 迭代标记 */
-.react-iteration-badge {
-  display: inline-block;
-  background: rgba(255, 255, 255, 0.3);
+.react-action-chip {
+  background: rgba(139, 92, 246, 0.15);
+  color: #6b21a8;
   padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 10px;
+  border-radius: 6px;
+  font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
+  font-size: 12px;
   font-weight: 600;
-  margin-left: 8px;
+}
+
+.react-iteration-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.5);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1f2937;
 }
