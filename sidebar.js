@@ -65,7 +65,9 @@ class AIChat {
     this.toolResultsCache = {};  // 🔧 工具结果缓存 { conversationId: [{ toolName, result, error, args, serviceName, timestamp, toolCallId }] }
     this.reActState = {
       active: false,
-      iteration: 0
+      iteration: 0,
+      lastContent: '',
+      noticeShown: false
     };
     
     this.init();
@@ -1558,8 +1560,9 @@ class AIChat {
     });
     
     // 🔧 修复：只有在没有tool_calls时才生成建议行动（确保是最终结果）
-    if (fullContent && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
-      await this.generateSuggestedActions(fullContent, message);
+    const suggestionContent = this.getReActFinalContent(fullContent);
+    if (suggestionContent && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
+      await this.generateSuggestedActions(suggestionContent, message);
     } else if (hasToolCalls) {
       logger.debug('[SuggestedActions] Skipping generation - tool calls detected, will generate after tool execution');
     }
@@ -2943,7 +2946,9 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
   startReActRun() {
     this.reActState = {
       active: true,
-      iteration: 0
+      iteration: 0,
+      lastContent: '',
+      noticeShown: false
     };
     logger.debug('[ReAct] Run started');
   }
@@ -2963,6 +2968,41 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     return !!this.reActState?.active;
   }
 
+  showReActCompletionNotice() {
+    try {
+      const messagesEl = document.getElementById('messages');
+      if (!messagesEl) return;
+      const noticeDiv = document.createElement('div');
+      noticeDiv.className = 'react-complete-notice';
+      noticeDiv.innerHTML = `
+        <div class="react-complete-card">
+          <div class="react-complete-header">
+            <span class="react-complete-icon">✅</span>
+            <div>
+              <div class="react-complete-title">ReAct 推理循环已结束</div>
+              <div class="react-complete-subtitle">基于当前信息生成最终响应</div>
+            </div>
+          </div>
+        </div>
+      `;
+      messagesEl.appendChild(noticeDiv);
+      this.scrollToBottom();
+    } catch (error) {
+      logger.warn('[ReAct] Failed to show completion notice:', error);
+    }
+  }
+
+  getReActFinalContent(preferredContent = '') {
+    if (preferredContent && preferredContent.trim().length > 0) {
+      return preferredContent;
+    }
+    const lastContent = this.reActState?.lastContent;
+    if (lastContent && lastContent.trim().length > 0) {
+      return lastContent;
+    }
+    return preferredContent;
+  }
+
   tryCompleteReActRun(fullContent = '') {
     if (!this.isReActRunning()) {
       return false;
@@ -2974,6 +3014,11 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       logger.debug('[ReAct] Run completed after iterations:', this.reActState.iteration || 0);
       this.reActState.active = false;
       this.reActState.iteration = 0;
+      this.reActState.lastContent = fullContent || '';
+      if (!this.reActState.noticeShown) {
+        this.showReActCompletionNotice();
+        this.reActState.noticeShown = true;
+      }
       return true;
     }
     return false;
@@ -3605,10 +3650,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       // 生成建议行动（只有在有tool_calls或没有Acting时才生成）
       if (fullContent && response.tool_calls) {
         // 工具调用后会在handleFunctionCalls中处理，这里不需要生成建议
-      } else if (fullContent && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
-        const reactData = TextFormatter.parseReActFormat(fullContent);
-        if (!reactData || !reactData.acting) {
-          await this.generateSuggestedActions(fullContent, originalQuery);
+      } else if (this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
+        const suggestionContent = this.getReActFinalContent(fullContent);
+        if (suggestionContent) {
+          await this.generateSuggestedActions(suggestionContent, originalQuery);
         }
       }
     } catch (error) {
@@ -4780,10 +4825,11 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         willGenerate: fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()
       });
       
-      if (fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
+      const suggestionContentAfterTools = this.getReActFinalContent(fullContent);
+      if (suggestionContentAfterTools && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
         logger.debug('[SuggestedActions] Generating after tool execution');
         try {
-          await this.generateSuggestedActions(fullContent, originalQuery);
+          await this.generateSuggestedActions(suggestionContentAfterTools, originalQuery);
         } catch (suggestError) {
           logger.error('[BatchExecute] Error generating suggestions:', suggestError);
           // 建议生成失败不应该影响主流程
