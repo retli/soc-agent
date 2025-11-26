@@ -63,6 +63,10 @@ class AIChat {
     this.pendingManualTools = {};  // 待执行的手动工具 { batchId: { tools: [], results: [], originalQuery: '' } }
     this.thehiveIntegration = null;  // TheHive 集成实例
     this.toolResultsCache = {};  // 🔧 工具结果缓存 { conversationId: [{ toolName, result, error, args, serviceName, timestamp, toolCallId }] }
+    this.reActState = {
+      active: false,
+      iteration: 0
+    };
     
     this.init();
   }
@@ -1187,16 +1191,21 @@ class AIChat {
       const response = await this.aiService.sendMessage(messages, options);
       
       // 处理流式响应
+      let fullContent = '';
       let toolCallsFromStream = null;
       if (response.stream) {
         // 🔧 修复：handleStreamResponse现在返回对象
         const streamResult = await this.handleStreamResponse(response);
         if (typeof streamResult === 'object' && streamResult !== null) {
+          fullContent = streamResult.content || '';
           toolCallsFromStream = streamResult.tool_calls || null;
+        } else {
+          fullContent = streamResult || '';
         }
       } else {
         // 非流式响应
         if (response.content) {
+          fullContent = response.content;
           this.appendMessage(MESSAGE_ROLES.ASSISTANT, response.content);
           this.saveConversations();
         }
@@ -1232,6 +1241,7 @@ class AIChat {
         }
       } else {
         logger.debug('[Tool Format] ✅ AI已完成分析，没有请求更多工具调用');
+        this.tryCompleteReActRun(fullContent || response.content || '');
         // 🔧 修复：确保UI已更新，滚动到底部
         this.scrollToBottom();
       }
@@ -1357,6 +1367,8 @@ class AIChat {
       logger.debug('[Send] History messages:', conversation.messages);
     }
     
+    this.startReActRun();
+    
     // 1. 准备Function列表
     // 🔧 修复：确保functions总是数组，防止未定义错误
     const functions = await this.prepareFunctions() || [];
@@ -1425,6 +1437,7 @@ class AIChat {
     } else {
       // 🔧 修复：没有工具调用时，隐藏loading
       this.hideLoading();
+      this.tryCompleteReActRun(fullContent || response.content || '');
       // 🔒 强制检查：如果AI在文本中写了"Acting"但没有实际调用工具，必须强制调用
       if (fullContent && functions.length > 0) {
         const reactData = TextFormatter.parseReActFormat(fullContent);
@@ -1541,11 +1554,11 @@ class AIChat {
       fullContent: !!fullContent,
       enableSuggestedActions: this.config.enableSuggestedActions,
       hasToolCalls: hasToolCalls,
-      willGenerate: fullContent && !hasToolCalls && this.config.enableSuggestedActions !== false
+      willGenerate: fullContent && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()
     });
     
     // 🔧 修复：只有在没有tool_calls时才生成建议行动（确保是最终结果）
-    if (fullContent && !hasToolCalls && this.config.enableSuggestedActions !== false) {
+    if (fullContent && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
       await this.generateSuggestedActions(fullContent, message);
     } else if (hasToolCalls) {
       logger.debug('[SuggestedActions] Skipping generation - tool calls detected, will generate after tool execution');
@@ -2926,6 +2939,45 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
 
 请严格按照ReAct格式组织你的回复，实现循环推理直到任务完成。`;
   }
+
+  startReActRun() {
+    this.reActState = {
+      active: true,
+      iteration: 0
+    };
+    logger.debug('[ReAct] Run started');
+  }
+
+  recordReActIteration() {
+    if (!this.reActState) {
+      this.reActState = { active: false, iteration: 0 };
+    }
+    if (!this.reActState.active) {
+      this.startReActRun();
+    }
+    this.reActState.iteration = (this.reActState.iteration || 0) + 1;
+    logger.debug('[ReAct] Iteration progress:', this.reActState.iteration);
+  }
+
+  isReActRunning() {
+    return !!this.reActState?.active;
+  }
+
+  tryCompleteReActRun(fullContent = '') {
+    if (!this.isReActRunning()) {
+      return false;
+    }
+    const hasPlainText = fullContent && fullContent.trim().length > 0;
+    const reactData = TextFormatter.parseReActFormat(fullContent);
+    const hasResponseBlock = reactData && reactData.response && reactData.response.trim().length > 0;
+    if (hasResponseBlock || (!reactData && hasPlainText)) {
+      logger.debug('[ReAct] Run completed after iterations:', this.reActState.iteration || 0);
+      this.reActState.active = false;
+      this.reActState.iteration = 0;
+      return true;
+    }
+    return false;
+  }
   
   /**
    * 处理Function Calling响应中的工具调用
@@ -2963,6 +3015,8 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         logger.warn('[FunctionCall] ⚠️ 没有有效的工具调用被提取');
         return;
       }
+      
+      this.recordReActIteration();
       
       // 限制最大调用次数
       const maxCalls = DEFAULT_CONFIG.ui.maxToolCallsPerTurn;
@@ -3490,6 +3544,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         await this.handleFunctionCalls(toolCalls, functions, originalQuery, 1);  // 强制重新生成后从深度1开始
       } else {
         // 如果还是没有tool_calls，再次检查（但只检查一次，避免无限循环）
+        this.tryCompleteReActRun(fullContent || response.content || '');
         if (fullContent) {
           const reactData = TextFormatter.parseReActFormat(fullContent);
           if (reactData && reactData.acting) {
@@ -3550,7 +3605,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       // 生成建议行动（只有在有tool_calls或没有Acting时才生成）
       if (fullContent && response.tool_calls) {
         // 工具调用后会在handleFunctionCalls中处理，这里不需要生成建议
-      } else if (fullContent && this.config.enableSuggestedActions !== false) {
+      } else if (fullContent && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
         const reactData = TextFormatter.parseReActFormat(fullContent);
         if (!reactData || !reactData.acting) {
           await this.generateSuggestedActions(fullContent, originalQuery);
@@ -4713,15 +4768,19 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       // 确保只在最终结果出现后才生成建议行动（没有tool_calls，流式响应完全结束）
       const hasToolCalls = toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0;
       
+      if (!hasToolCalls) {
+        this.tryCompleteReActRun(fullContent || '');
+      }
+      
       logger.debug('[SuggestedActions] Config check after tool execution:', {
         fullContent: !!fullContent,
         fullContentLength: fullContent?.length || 0,
         enableSuggestedActions: this.config.enableSuggestedActions,
         hasToolCalls: hasToolCalls,
-        willGenerate: fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false
+        willGenerate: fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()
       });
       
-      if (fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false) {
+      if (fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
         logger.debug('[SuggestedActions] Generating after tool execution');
         try {
           await this.generateSuggestedActions(fullContent, originalQuery);
