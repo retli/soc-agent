@@ -16,7 +16,9 @@ export const DEFAULT_CONFIG = {
     temperature: 0.7,  // 温度参数，控制回复的随机性（0-1，越高越随机）
     maxTokenLength: 1024,  // 最大token长度（OpenAI: max_tokens）
     topP: 1,  // 核采样参数（0-1，控制候选词的范围，OpenAI: top_p）
-    stream: true  // 是否启用流式响应（打字机效果）
+    stream: true,  // 是否启用流式响应（打字机效果）
+    timeout: 60000,  // 请求总超时时间（毫秒）
+    streamTimeout: 60000  // 流式响应在无增量数据时的超时时间（毫秒）
   },
   
   // 用户配置

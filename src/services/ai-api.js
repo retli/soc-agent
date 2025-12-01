@@ -33,7 +33,7 @@
  */
 
 // AI API service layer
-import { DEFAULT_CONFIG } from '../config/defaults.js';
+import { DEFAULT_CONFIG, DEV_CONFIG } from '../config/defaults.js';
 import { MESSAGE_ROLES } from '../config/constants.js';
 import { logger } from '../utils/logger.js';
 
@@ -54,6 +54,18 @@ export class AIAPIService {
    */
   async sendMessage(messages, options = {}) {
     const useStream = options.stream !== undefined ? options.stream : (this.config.stream || DEFAULT_CONFIG.api.stream);
+    const timeoutMs = typeof options.timeout === 'number'
+      ? options.timeout
+      : (this.config.timeout || this.config.apiTimeout || DEFAULT_CONFIG.api.timeout || DEV_CONFIG.apiTimeout || 60000);
+    const streamTimeoutMs = typeof options.streamTimeout === 'number'
+      ? options.streamTimeout
+      : (this.config.streamTimeout || DEFAULT_CONFIG.api.streamTimeout || timeoutMs);
+    
+    const controller = new AbortController();
+    const buildTimeoutError = (stage = '请求') => {
+      const seconds = Math.max(1, Math.round((timeoutMs || 1000) / 1000));
+      return new Error(`AI${stage}超时（>${seconds}秒），请稍后重试或精简输入`);
+    };
     
     logger.debug('[API] Sending message. Stream:', useStream, 'Options:', options);
     logger.debug('[API] Messages:', messages);
@@ -99,28 +111,79 @@ export class AIAPIService {
     logger.debug('[API] Request headers:', requestHeaders);
     logger.debug('[API] Request body:', requestBody);
     
-    const response = await fetch(requestUrl, {
-      method: 'POST',
-      headers: requestHeaders,
-      body: JSON.stringify(requestBody)
-    });
+    let handshakeTimedOut = false;
+    let handshakeTimerId = null;
+    if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      handshakeTimerId = setTimeout(() => {
+        handshakeTimedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+    
+    let response;
+    try {
+      response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (handshakeTimerId) {
+        clearTimeout(handshakeTimerId);
+      }
+      if (handshakeTimedOut || error.name === 'AbortError') {
+        logger.error('[API] Request aborted due to timeout after', timeoutMs, 'ms');
+        throw buildTimeoutError('请求');
+      }
+      throw error;
+    }
+    
+    if (handshakeTimerId) {
+      clearTimeout(handshakeTimerId);
+    }
     
     logger.debug('[API] Response status:', response.status, response.statusText);
     logger.debug('[API] Response headers:', Object.fromEntries(response.headers.entries()));
     
+    const readBodyWithTimeout = async () => {
+      const shouldTimeout = timeoutMs > 0 && Number.isFinite(timeoutMs);
+      if (!shouldTimeout) {
+        return await response.text();
+      }
+      
+      let bodyTimedOut = false;
+      const bodyTimerId = setTimeout(() => {
+        bodyTimedOut = true;
+        controller.abort();
+      }, timeoutMs);
+      
+      try {
+        return await response.text();
+      } catch (error) {
+        if (bodyTimedOut || error.name === 'AbortError') {
+          logger.error('[API] Response body read timeout after', timeoutMs, 'ms');
+          throw buildTimeoutError('响应');
+        }
+        throw error;
+      } finally {
+        clearTimeout(bodyTimerId);
+      }
+    };
+    
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await readBodyWithTimeout();
       logger.error('[API] Error response:', errorText);
       throw new Error(`API request failed: ${response.status} ${errorText}`);
     }
     
     // 流式响应
     if (useStream) {
-      return this.handleStreamResponse(response);
+      return this.handleStreamResponse(response, controller, streamTimeoutMs, buildTimeoutError);
     }
     
     // 非流式响应
-    const responseText = await response.text();
+    const responseText = await readBodyWithTimeout();
     logger.debug('[API] Non-stream response text:', responseText.substring(0, 200));
     
     try {
@@ -161,20 +224,65 @@ export class AIAPIService {
   /**
    * Handle streaming response
    */
-  async handleStreamResponse(response) {
+  async handleStreamResponse(response, abortController = null, streamTimeoutMs = null, timeoutErrorBuilder = null) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     const toolCallsMap = {}; // 累积工具调用 {index: {id, type, function: {name, arguments}}}
     let finishReason = null;
+    const fallbackTimeout = DEFAULT_CONFIG.api.streamTimeout || DEFAULT_CONFIG.api.timeout || DEV_CONFIG.apiTimeout || 60000;
+    const effectiveStreamTimeout = streamTimeoutMs > 0 && Number.isFinite(streamTimeoutMs) ? streamTimeoutMs : fallbackTimeout;
+    let abortedByTimeout = false;
+    let inactivityTimer = null;
+    
+    const cancelStream = (reason = 'cancelled') => {
+      if (abortController) {
+        try {
+          abortController.abort();
+        } catch (err) {
+          logger.warn('[API] Abort controller cancel failed:', err);
+        }
+      } else {
+        reader.cancel(reason).catch(() => {});
+      }
+    };
+    
+    const resetInactivityTimer = () => {
+      if (!(effectiveStreamTimeout > 0 && Number.isFinite(effectiveStreamTimeout))) {
+        return;
+      }
+      if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
+      }
+      inactivityTimer = setTimeout(() => {
+        abortedByTimeout = true;
+        logger.error('[API] Stream timeout after', effectiveStreamTimeout, 'ms, cancelling reader');
+        cancelStream('stream-timeout');
+      }, effectiveStreamTimeout);
+    };
+    
+    resetInactivityTimer();
     
     const result = {
       stream: true,
       tool_calls: null, // 将在流结束后设置
+      cancel: () => cancelStream('user-cancelled'),
       async *readStream() {
         try {
           while (true) {
-            const { done, value } = await reader.read();
+            let readResult;
+            try {
+              readResult = await reader.read();
+            } catch (error) {
+              if (abortedByTimeout || error.name === 'AbortError') {
+                logger.error('[API] Stream aborted while reading:', error);
+                throw (timeoutErrorBuilder ? timeoutErrorBuilder('响应') : new Error('AI响应超时，流式连接已终止'));
+              }
+              throw error;
+            }
+            
+            resetInactivityTimer();
+            const { done, value } = readResult;
             
             if (done) {
               logger.debug('[API] Stream completed');
@@ -277,6 +385,10 @@ export class AIAPIService {
             }
           }
         } finally {
+          if (inactivityTimer) {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = null;
+          }
           reader.releaseLock();
           
           // 流结束后，转换toolCallsMap为数组
