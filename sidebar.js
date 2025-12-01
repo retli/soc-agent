@@ -241,6 +241,11 @@ class AIChat {
   
   async loadConversations() {
     this.conversations = await StorageManager.getConversations();
+    this.conversations.forEach(conv => {
+      if (!conv.metadata || typeof conv.metadata !== 'object') {
+        conv.metadata = {};
+      }
+    });
     logger.info('[Init] Loaded conversations:', this.conversations.length);
     this.conversations.forEach((conv, idx) => {
       logger.debug(`[Init] Conversation ${idx}: ID=${conv.id}, Messages=${conv.messages.length}, Title=${conv.title}`);
@@ -388,7 +393,8 @@ class AIChat {
       title: '新对话',
       messages: [],
       conversationId: null,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      metadata: {}
     };
     
     this.conversations.unshift(conversation);
@@ -436,6 +442,30 @@ class AIChat {
   
   getCurrentConversation() {
     return this.conversations.find(c => c.id === this.currentConversationId);
+  }
+
+  ensureConversationMetadata(conversation) {
+    if (!conversation) return;
+    if (!conversation.metadata || typeof conversation.metadata !== 'object') {
+      conversation.metadata = {};
+    }
+  }
+
+  getConversationHistoryWithContext(conversation, overrideHistory = null) {
+    if (!conversation) {
+      return overrideHistory || [];
+    }
+    this.ensureConversationMetadata(conversation);
+    const baseHistory = overrideHistory || (conversation.messages || []);
+    const contextMessages = [];
+    const thehiveComments = conversation.metadata?.thehiveComments;
+    if (thehiveComments && thehiveComments.trim().length > 0) {
+      contextMessages.push({
+        role: MESSAGE_ROLES.SYSTEM,
+        content: `[TheHive Comments]\n${thehiveComments}`
+      });
+    }
+    return contextMessages.length > 0 ? [...contextMessages, ...baseHistory] : baseHistory;
   }
 
   // ==================== 3. 消息渲染 ====================
@@ -1182,9 +1212,10 @@ class AIChat {
       }
       
       // 包含对话历史的消息
+      const historyWithContext = this.getConversationHistoryWithContext(conversation);
       const messages = this.aiService.buildMessages(
         formatPrompt,
-        conversation ? conversation.messages : [],
+        historyWithContext,
         systemPrompt
       );
       
@@ -1382,9 +1413,10 @@ class AIChat {
       systemPrompt = this.buildSystemPromptForFunctionCalling();
     }
     
+    const historyWithContext = this.getConversationHistoryWithContext(conversation);
     const messages = this.aiService.buildMessages(
       message,
-      conversation ? conversation.messages : [],
+      historyWithContext,
       systemPrompt
     );
     
@@ -1582,13 +1614,10 @@ class AIChat {
       
       // 收集丰富的上下文信息
       const context = this.buildSuggestionContext(aiResponse, userQuery);
-      const notifyPreferred = this.shouldRecommendEmailNotification(context);
-      let composeToolAvailable = false;
       logger.info('[SuggestedActions] Context collected:', {
         hasToolResults: !!context.toolResults,
         hasEntities: !!context.entities,
-        responseLength: context.response.length,
-        notifyPreferred
+        responseLength: context.response.length
       });
       
       // 🔧 获取可用的MCP工具列表
@@ -1596,7 +1625,6 @@ class AIChat {
       try {
         const functions = await this.prepareFunctions();
         if (functions && functions.length > 0) {
-          composeToolAvailable = this.hasComposeWindowTool(functions);
           // 格式化工具列表为可读文本
           const toolsList = functions.map((func, index) => {
             const toolName = func.function?.name || func.name || '未知工具';
@@ -1617,9 +1645,6 @@ ${toolsList}
 - 如果不需要工具就能给出有效建议，可以直接给出建议，无需强制使用工具。
 - 请基于具体情况判断是否需要使用工具，不要为了使用工具而使用工具。
 `;
-          if (composeToolAvailable) {
-            availableToolsText += `\n- open_compose_window: 打开邮件编辑窗口（仅生成草稿，不自动发送），常用于“邮件通知负责人”。\n`;
-          }
           
           logger.info('[SuggestedActions] Available tools:', functions.length);
         } else {
@@ -1645,10 +1670,6 @@ ${context.entities}
 
 ` : ''}${availableToolsText}
 
-${notifyPreferred ? `## 通知负责人提示
-- 上下文提到需要通知或告知负责人，请优先（非强制）在建议中包含“邮件通知负责人”。
-- 如果 open_compose_window 工具可用，请明确指定使用该工具以打开邮件编辑窗口（仅草稿，不发送）。` : ''}
-
 ## 你的任务
 请分析当前的安全事件类型（如：恶意IP分析、恶意软件感染、可疑登录、漏洞利用、数据泄露、内部威胁等），然后提供2-3条最有价值的后续行动建议。
 
@@ -1664,10 +1685,9 @@ ${notifyPreferred ? `## 通知负责人提示
 2. 可直接执行
 3. **工具使用是可选的**：只有当工具确实有助于解决问题时才推荐使用工具。如果不需要工具就能给出有效建议，可以直接给出建议。
 4. 如果建议使用工具，可以明确指定工具名称（格式：使用 [工具名称] 执行 [操作]）
-5. 如果上下文提到需要通知负责人，请优先给出“邮件通知负责人”建议，并在可行时指定工具 open_compose_window（仅打开邮件草稿，不发送）
-6. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
-7. 按紧急程度排序
-8. 如果是高危情况，第一条必须是紧急处置动作
+5. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
+6. 按紧急程度排序
+7. 如果是高危情况，第一条必须是紧急处置动作
 
 ## 输出格式（纯JSON，不要markdown代码块）
 {
@@ -2952,11 +2972,6 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
    - 对于简单问题，可以简化格式，但必须包含Reasoning和Response
    - 在Acting部分，**只写简洁的文字说明和工具名称**，不要写详细的参数信息
 
-7. **沟通与邮件通知（优先但非强制）**：
-   - 当推理或上下文表明需要提醒/通知负责人（owner、负责人、管理者等）时，**优先**在Acting或Response中加入“邮件通知负责人”的步骤。
-   - 如果工具 \`open_compose_window\` 可用，优先在Acting中调用该工具以打开邮件编辑窗口（仅打开草稿，不自动发送），并在文本中说明此操作。
-   - 如果没有该工具，也应在响应或建议中提示需要人工完成“邮件通知负责人”。
-
 请严格按照ReAct格式组织你的回复，实现循环推理直到任务完成。`;
   }
 
@@ -3018,30 +3033,6 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return lastContent;
     }
     return preferredContent;
-  }
-
-  hasComposeWindowTool(functions = []) {
-    if (!functions || !Array.isArray(functions)) return false;
-    return functions.some(func => {
-      const name = func.function?.name || func.name || '';
-      return name.toLowerCase() === 'open_compose_window';
-    });
-  }
-
-  shouldRecommendEmailNotification(context = {}) {
-    const segments = [];
-    if (context.query) segments.push(context.query);
-    if (context.response) segments.push(context.response);
-    if (context.toolResults) segments.push(context.toolResults);
-    const combined = segments.join('\n');
-    if (!combined.trim()) return false;
-    const lower = combined.toLowerCase();
-    const chineseKeywords = ['负责人', '通知负责人', '邮件通知', '告知负责人', '联系负责人', '通知责任人'];
-    const englishKeywords = ['notify owner', 'mail owner', 'email owner', 'notify lead', 'email manager'];
-    if (englishKeywords.some(keyword => lower.includes(keyword))) {
-      return true;
-    }
-    return chineseKeywords.some(keyword => combined.includes(keyword));
   }
 
   tryCompleteReActRun(fullContent = '') {
@@ -3590,9 +3581,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         return true;
       }) : [];
       
+      const historyWithContext = this.getConversationHistoryWithContext(conversation, filteredMessages);
       const messages = this.aiService.buildMessages(
         forcePrompt,
-        filteredMessages,
+        historyWithContext,
         systemPrompt
       );
       
@@ -4106,9 +4098,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       
       // 🔧 修复：包含完整的对话历史（包括tool_calls和tool结果），让AI看到完整的ReAct上下文
       // 但是不传递tools选项，强制AI生成文本而不是调用工具
+      const historyWithContext = this.getConversationHistoryWithContext(conversation);
       const messages = this.aiService.buildMessages(
         comprehensivePrompt,
-        conversation ? conversation.messages : [],
+        historyWithContext,
         null,  // 不使用system prompt（避免ReAct循环提示）
         true   // 🔧 修复：includeToolResults = true，让AI看到完整的工具调用上下文
                 // 这样AI可以理解之前的工具调用和结果，但不会继续调用工具（因为options中没有tools）
@@ -4271,10 +4264,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         const recentMessages = conversation && conversation.messages 
           ? conversation.messages.slice(-messageLimit)
           : [];
-        
+        const historyWithContext = this.getConversationHistoryWithContext(conversation, recentMessages);
         messages = this.aiService.buildMessages(
           simplePrompt,
-          recentMessages,
+          historyWithContext,
           null,  // 不使用system prompt
           false  // 🔧 修复：不包含工具结果（因为已经在simplePrompt中包含了）
         );
@@ -4629,12 +4622,12 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       // 3. 基于这些上下文决定是否需要继续调用工具
       
       // 🔧 修复：先检查conversation history中是否有工具结果
-      const conversationHistory = conversation ? conversation.messages : [];
-      const toolMessages = conversationHistory.filter(msg => msg.role === MESSAGE_ROLES.TOOL);
-      const assistantMessages = conversationHistory.filter(msg => msg.role === MESSAGE_ROLES.ASSISTANT);
+      const rawConversationHistory = conversation ? conversation.messages : [];
+      const toolMessages = rawConversationHistory.filter(msg => msg.role === MESSAGE_ROLES.TOOL);
+      const assistantMessages = rawConversationHistory.filter(msg => msg.role === MESSAGE_ROLES.ASSISTANT);
       
       logger.info('[BatchExecute] Conversation history check:');
-      logger.info('[BatchExecute] - Total messages:', conversationHistory.length);
+      logger.info('[BatchExecute] - Total messages:', rawConversationHistory.length);
       logger.info('[BatchExecute] - Tool messages:', toolMessages.length);
       logger.info('[BatchExecute] - Assistant messages:', assistantMessages.length);
       logger.info('[BatchExecute] - Tool results from execution:', toolResults.length);
@@ -4646,9 +4639,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         });
       }
       
+      const conversationHistoryWithContext = this.getConversationHistoryWithContext(conversation);
       const messages = this.aiService.buildMessages(
         comprehensivePrompt,
-        conversationHistory,
+        conversationHistoryWithContext,
         systemPrompt,
         true  // 🔧 includeToolResults = true，让AI看到完整的工具调用上下文，支持循环调用
       );
@@ -4722,9 +4716,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
           const forceConclusionPrompt = `请基于刚才执行的工具结果，直接给出分析结论，不要再调用其他工具。工具已经返回了足够的信息来回答用户的问题。\n\n用户问题：${originalQuery}\n\n请直接给出分析结论。`;
           
           // 🔧 修复：包含完整的对话历史，让AI看到完整的ReAct上下文
+          const forceHistory = this.getConversationHistoryWithContext(conversation);
           const forceMessages = this.aiService.buildMessages(
             forceConclusionPrompt,
-            conversation ? conversation.messages : [],
+            forceHistory,
             null,  // 不使用system prompt
             true   // 🔧 修复：includeToolResults = true，让AI看到完整的工具调用上下文
                     // 但不会继续调用工具（因为options中没有tools）
@@ -4797,9 +4792,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
           // 强制AI生成分析结果（不使用工具调用）
           try {
             const forceAnalysisPrompt = `请基于刚才执行的工具结果，给出详细的安全分析。工具已执行完成，请直接分析结果并回答用户的问题，不要再次调用工具。\n\n用户问题：${originalQuery}\n\n请给出详细的安全分析报告。`;
+            const forceHistory = this.getConversationHistoryWithContext(conversation);
             const forceMessages = this.aiService.buildMessages(
               forceAnalysisPrompt,
-              conversation ? conversation.messages : [],
+              forceHistory,
               null,  // 不使用system prompt
               false  // 不包含工具结果，因为已经在历史中
             );
@@ -5015,6 +5011,29 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     }
   }
 
+  parseTheHiveSuggestions(commentsText) {
+    if (!commentsText) return [];
+    const match = commentsText.match(/建议[：:]\s*([\s\S]+)/i);
+    const section = match ? match[1] : commentsText;
+    const normalized = section.replace(/\r/g, '').trim();
+    if (!normalized) return [];
+    const segments = normalized
+      .split(/(?=\d+\s*[\.、\)\）])/)
+      .map(seg => seg.replace(/^\d+\s*[\.、\)\）]/, '').trim())
+      .filter(Boolean);
+    return segments;
+  }
+
+  renderTheHiveSuggestions(suggestions) {
+    if (!suggestions || suggestions.length === 0) return;
+    const mapped = suggestions.map((action, index) => ({
+      action,
+      priority: index === 0 ? 'high' : (index === 1 ? 'medium' : 'low'),
+      source: 'thehive'
+    }));
+    this.displaySuggestedActions(mapped, 'TheHive 建议');
+  }
+
   
   // 注意：以下方法已不再需要，因为按钮现在由 content.js 管理
   // checkTheHivePage(), showTheHiveButton(), hideTheHiveButton() 已移除
@@ -5056,13 +5075,23 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       // 获取 Comments
       const commentsText = await this.thehiveIntegration.getCaseComments();
       
-      // 填充到输入框
-      const inputEl = document.getElementById('messageInput');
-      inputEl.value = commentsText;
+      // 解析并渲染 TheHive 建议
+      const hiveSuggestions = this.parseTheHiveSuggestions(commentsText);
+      if (hiveSuggestions.length > 0) {
+        this.renderTheHiveSuggestions(hiveSuggestions);
+      } else {
+        logger.info('[TheHive] No structured suggestions found in comments');
+      }
       
-      // 自动调整输入框高度
-      inputEl.style.height = 'auto';
-      inputEl.style.height = Math.min(inputEl.scrollHeight, 300) + 'px';
+      // 将 comments 保存到当前对话的上下文中
+      if (conversation) {
+        this.ensureConversationMetadata(conversation);
+        conversation.metadata.thehiveComments = commentsText;
+        conversation.metadata.thehiveCaseId = caseId;
+        conversation.metadata.thehiveUpdatedAt = new Date().toISOString();
+        this.saveConversations();
+        logger.info('[TheHive] Comments stored in conversation metadata for context');
+      }
       
       logger.info('[TheHive] ✓ Case and comments loaded successfully');
       
