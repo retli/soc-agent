@@ -5037,14 +5037,29 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
 
   parseTheHiveSuggestions(commentsText) {
     if (!commentsText) return [];
-    const match = commentsText.match(/建议[：:]\s*([\s\S]+)/i);
-    const section = match ? match[1] : commentsText;
-    const normalized = section.replace(/\r/g, '').trim();
-    if (!normalized) return [];
-    const segments = normalized
+    
+    const normalizedText = commentsText.replace(/\r/g, '').trim();
+    if (!normalizedText) return [];
+    
+    // TheHive comments由“---”分隔，这里只提取包含“建议”关键字的片段，避免将非建议内容误解析
+    const commentBlocks = normalizedText
+      .split(/\n?-{3,}\n?/g)
+      .map(block => block.trim())
+      .filter(Boolean);
+    
+    const candidateBlocks = commentBlocks.filter(block => /建议[：:]/i.test(block));
+    const candidateText = candidateBlocks.length > 0 ? candidateBlocks.join('\n') : normalizedText;
+    
+    const match = candidateText.match(/建议[：:]\s*([\s\S]+)/i);
+    const section = match ? match[1] : candidateText;
+    const cleaned = section.trim();
+    if (!cleaned) return [];
+    
+    const segments = cleaned
       .split(/(?=\d+\s*[\.、\)\）])/)
       .map(seg => seg.replace(/^\d+\s*[\.、\)\）]/, '').trim())
       .filter(Boolean);
+    
     return segments;
   }
 
