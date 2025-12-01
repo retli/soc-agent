@@ -1582,10 +1582,13 @@ class AIChat {
       
       // 收集丰富的上下文信息
       const context = this.buildSuggestionContext(aiResponse, userQuery);
+      const notifyPreferred = this.shouldRecommendEmailNotification(context);
+      let composeToolAvailable = false;
       logger.info('[SuggestedActions] Context collected:', {
         hasToolResults: !!context.toolResults,
         hasEntities: !!context.entities,
-        responseLength: context.response.length
+        responseLength: context.response.length,
+        notifyPreferred
       });
       
       // 🔧 获取可用的MCP工具列表
@@ -1593,6 +1596,7 @@ class AIChat {
       try {
         const functions = await this.prepareFunctions();
         if (functions && functions.length > 0) {
+          composeToolAvailable = this.hasComposeWindowTool(functions);
           // 格式化工具列表为可读文本
           const toolsList = functions.map((func, index) => {
             const toolName = func.function?.name || func.name || '未知工具';
@@ -1613,6 +1617,9 @@ ${toolsList}
 - 如果不需要工具就能给出有效建议，可以直接给出建议，无需强制使用工具。
 - 请基于具体情况判断是否需要使用工具，不要为了使用工具而使用工具。
 `;
+          if (composeToolAvailable) {
+            availableToolsText += `\n- open_compose_window: 打开邮件编辑窗口（仅生成草稿，不自动发送），常用于“邮件通知负责人”。\n`;
+          }
           
           logger.info('[SuggestedActions] Available tools:', functions.length);
         } else {
@@ -1638,6 +1645,10 @@ ${context.entities}
 
 ` : ''}${availableToolsText}
 
+${notifyPreferred ? `## 通知负责人提示
+- 上下文提到需要通知或告知负责人，请优先（非强制）在建议中包含“邮件通知负责人”。
+- 如果 open_compose_window 工具可用，请明确指定使用该工具以打开邮件编辑窗口（仅草稿，不发送）。` : ''}
+
 ## 你的任务
 请分析当前的安全事件类型（如：恶意IP分析、恶意软件感染、可疑登录、漏洞利用、数据泄露、内部威胁等），然后提供2-3条最有价值的后续行动建议。
 
@@ -1653,9 +1664,10 @@ ${context.entities}
 2. 可直接执行
 3. **工具使用是可选的**：只有当工具确实有助于解决问题时才推荐使用工具。如果不需要工具就能给出有效建议，可以直接给出建议。
 4. 如果建议使用工具，可以明确指定工具名称（格式：使用 [工具名称] 执行 [操作]）
-5. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
-6. 按紧急程度排序
-7. 如果是高危情况，第一条必须是紧急处置动作
+5. 如果上下文提到需要通知负责人，请优先给出“邮件通知负责人”建议，并在可行时指定工具 open_compose_window（仅打开邮件草稿，不发送）
+6. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
+7. 按紧急程度排序
+8. 如果是高危情况，第一条必须是紧急处置动作
 
 ## 输出格式（纯JSON，不要markdown代码块）
 {
@@ -2940,6 +2952,11 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
    - 对于简单问题，可以简化格式，但必须包含Reasoning和Response
    - 在Acting部分，**只写简洁的文字说明和工具名称**，不要写详细的参数信息
 
+7. **沟通与邮件通知（优先但非强制）**：
+   - 当推理或上下文表明需要提醒/通知负责人（owner、负责人、管理者等）时，**优先**在Acting或Response中加入“邮件通知负责人”的步骤。
+   - 如果工具 \`open_compose_window\` 可用，优先在Acting中调用该工具以打开邮件编辑窗口（仅打开草稿，不自动发送），并在文本中说明此操作。
+   - 如果没有该工具，也应在响应或建议中提示需要人工完成“邮件通知负责人”。
+
 请严格按照ReAct格式组织你的回复，实现循环推理直到任务完成。`;
   }
 
@@ -3001,6 +3018,30 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return lastContent;
     }
     return preferredContent;
+  }
+
+  hasComposeWindowTool(functions = []) {
+    if (!functions || !Array.isArray(functions)) return false;
+    return functions.some(func => {
+      const name = func.function?.name || func.name || '';
+      return name.toLowerCase() === 'open_compose_window';
+    });
+  }
+
+  shouldRecommendEmailNotification(context = {}) {
+    const segments = [];
+    if (context.query) segments.push(context.query);
+    if (context.response) segments.push(context.response);
+    if (context.toolResults) segments.push(context.toolResults);
+    const combined = segments.join('\n');
+    if (!combined.trim()) return false;
+    const lower = combined.toLowerCase();
+    const chineseKeywords = ['负责人', '通知负责人', '邮件通知', '告知负责人', '联系负责人', '通知责任人'];
+    const englishKeywords = ['notify owner', 'mail owner', 'email owner', 'notify lead', 'email manager'];
+    if (englishKeywords.some(keyword => lower.includes(keyword))) {
+      return true;
+    }
+    return chineseKeywords.some(keyword => combined.includes(keyword));
   }
 
   tryCompleteReActRun(fullContent = '') {
