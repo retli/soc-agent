@@ -11,7 +11,7 @@ export class URLMatcher {
    */
   static isTheHiveCasePage(url) {
     // 匹配 /cases/~数字 或 /cases/~数字/details
-    // 示例: http://10.85.205.68:9000/cases/~534597760/details
+    // 示例: http://127.0.0.1:9000/cases/~534597760/details
     const pattern = /\/cases\/~\d+(?:\/details)?/;
     return pattern.test(url);
   }

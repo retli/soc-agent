@@ -9,10 +9,10 @@
 export const DEFAULT_CONFIG = {
   // AI API 配置
   api: {
-    url: 'https://cnapi-i.bmw-brilliance.cn/aiplatform/llmplatformapimanagement/v1/lm-platform/llm/auto/task4Api',  // API服务地址
-    key: 'cb4b490dde024294ae4b2ebfbde7f15d',  // API密钥（用户需要配置）
-    authorization: 'ACCESSCODE D0D5B317ED6749CAAD151105808A5CE5',  // Authorization 认证参数（格式：ACCESSCODE 2A59B9E135CD4614B6350E456E754FB7）
-    model: 'qwen3-235b-a22b',  // 默认使用的AI模型名称（OpenAI格式）
+    url: 'https://api.example.com/v1',  // API服务地址（示例值，需在设置中配置）
+    key: '',  // API密钥（用户需要在设置页面填写）
+    authorization: '',  // Authorization 认证参数（示例：ACCESSCODE XXXXX）
+    model: 'gpt-4o-mini',  // 默认使用的AI模型名称（示例值，可在设置中修改）
     temperature: 0.7,  // 温度参数，控制回复的随机性（0-1，越高越随机）
     maxTokenLength: 1024,  // 最大token长度（OpenAI: max_tokens）
     topP: 1,  // 核采样参数（0-1，控制候选词的范围，OpenAI: top_p）
@@ -65,8 +65,8 @@ export const DEFAULT_CONFIG = {
   // TheHive 集成配置
   thehive: {
     enabled: true,  // 是否启用 TheHive 集成
-    apiUrl: 'http://10.85.205.68:9000',  // TheHive API URL
-    apiKey: 'JVHxztCpvgj5mH8dC76YQcGnmPVkXGIL',  // TheHive API Key
+    apiUrl: 'http://127.0.0.1:9000',  // TheHive API URL（示例值）
+    apiKey: '',  // TheHive API Key（用户需在设置中填写）
     organization: '',  // TheHive 组织名称（可选）
     autoDetect: true,  // 自动检测 TheHive 页面
     showLoadButton: true,  // 显示加载 Case 按钮

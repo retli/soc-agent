@@ -188,7 +188,7 @@ export class TheHiveAPI {
    * @param {string} url - TheHive URL
    * @returns {string|null} Case ID (包含 ~ 前缀) 或 null
    * @example
-   * extractCaseIdFromUrl('http://10.85.205.68:9000/cases/~534597760/details')
+   * extractCaseIdFromUrl('http://127.0.0.1:9000/cases/~534597760/details')
    * // 返回: '~534597760'
    */
   static extractCaseIdFromUrl(url) {

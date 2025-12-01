@@ -235,13 +235,13 @@ handleSuggestionClick(suggestion) {
 
 **用户输入**：
 ```
-分析可疑邮件，发件人：admin@bmw-secure.com
+分析可疑邮件，发件人：admin@malicious-example.com
 ```
 
 **AI回复**：
 ```
 该邮件疑似钓鱼攻击：
-- 域名伪造（正确域名应为 bmw-brilliance.cn）
+- 域名伪造（正确域名应为 corp-example.cn）
 - 包含恶意链接
 - 要求输入凭据
 ```

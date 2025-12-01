@@ -38,7 +38,7 @@
 
 1. 点击扩展图标旁的"设置"按钮
 2. 填写以下信息：
-   - **API 地址**: API 的基础地址（默认：`https://cnapi-t.bmw-brilliance.cn/aiplatform/llmplatformapimanagement/v1`）
+   - **API 地址**: API 的基础地址（默认：`https://api.example.com/v1`）
    - **API Key**: API Key
    - **用户 ID**: 可选，用于标识用户
 3. 点击"保存设置"
@@ -259,7 +259,7 @@ StorageManager.saveConversations()           # 保存对话
 ```javascript
 DEFAULT_CONFIG = {
   api: {
-    url: 'https://cnapi-t.bmw-brilliance.cn/aiplatform/llmplatformapimanagement/v1',
+    url: 'https://api.example.com/v1',
     key: '',
     model: 'Qwen1.5-14B-Chat',
     temperature: 0.7,
