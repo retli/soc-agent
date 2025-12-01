@@ -1655,6 +1655,18 @@ ${toolsList}
         // 继续执行，即使获取工具失败
       }
       
+      const ownerEmailSection = context.ownerEmail ? `## Owner邮箱
+检测到资产Owner邮箱：${context.ownerEmail}
+
+` : '';
+      
+      const emailStrategySection = `## 邮件通知策略
+- “邮件通知工具”对应 MCP 工具 **open_compose_window**（用于打开邮件编写窗口，仅草拟邮件，暂不发送）。
+- 默认应优先考虑使用 open_compose_window 草拟邮件通知资产 Owner 或关键干系人，但若场景不需要邮件沟通可跳过。
+${context.ownerEmail ? `- 已识别资产 Owner 邮箱：${context.ownerEmail}，请优先考虑生成一条使用 open_compose_window、面向该邮箱的通知建议，并说明目的。` : '- 如果上下文出现资产 Owner / 责任人邮箱，请在邮件通知建议中明确该邮箱并使用 open_compose_window 草拟邮件。'}
+- 如生成邮件通知建议，请写明通知目标、目的和需要同步的关键信息。
+`;
+      
       // 构建针对事件响应的智能prompt
       const suggestPrompt = `你是一位资深的SOC安全分析师，擅长事件响应和威胁调查。
 
@@ -1668,7 +1680,7 @@ ${context.toolResults}
 ` : ''}${context.entities ? `## 关键实体
 ${context.entities}
 
-` : ''}${availableToolsText}
+` : ''}${availableToolsText}${ownerEmailSection}${emailStrategySection}
 
 ## 你的任务
 请分析当前的安全事件类型（如：恶意IP分析、恶意软件感染、可疑登录、漏洞利用、数据泄露、内部威胁等），然后提供2-3条最有价值的后续行动建议。
@@ -1683,11 +1695,11 @@ ${context.entities}
 ## 建议要求
 1. 简短精准（10-20字）
 2. 可直接执行
-3. **工具使用是可选的**：只有当工具确实有助于解决问题时才推荐使用工具。如果不需要工具就能给出有效建议，可以直接给出建议。
-4. 如果建议使用工具，可以明确指定工具名称（格式：使用 [工具名称] 执行 [操作]）
-5. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
-6. 按紧急程度排序
-7. 如果是高危情况，第一条必须是紧急处置动作
+3. 工具使用整体可选；若使用，请写明工具名称（格式：使用 [工具名称] 执行 [操作]）
+4. 优先考虑通过 **open_compose_window** 草拟邮件同步关键信息；若发现资产 Owner/负责人邮箱，请尽量在邮件建议中点名该邮箱
+5. 邮件通知仅需草拟内容，不直接发送，邮件建议需说明通知目的
+6. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
+7. 按紧急程度排序，高危情况下第一条必须是紧急处置动作
 
 ## 输出格式（纯JSON，不要markdown代码块）
 {
@@ -1802,6 +1814,18 @@ ${context.entities}
     if (domains) {
       const uniqueDomains = [...new Set(domains.map(d => d.toLowerCase()))].slice(0, 2);
       entities.push(`域名: ${uniqueDomains.join(', ')}`);
+    }
+    
+    // 邮箱与Owner邮箱
+    const emailMatches = text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
+    if (emailMatches) {
+      const uniqueEmails = [...new Set(emailMatches.map(e => e.toLowerCase()))];
+      context.emails = uniqueEmails;
+      entities.push(`邮箱: ${uniqueEmails.slice(0, 3).join(', ')}`);
+    }
+    const ownerEmailMatch = text.match(/(?:owner|资产负责人|负责人|所有者)\s*(?:[:：-]?\s*)?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
+    if (ownerEmailMatch) {
+      context.ownerEmail = ownerEmailMatch[1];
     }
     
     // CVE编号
