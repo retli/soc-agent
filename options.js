@@ -433,6 +433,7 @@ class OptionsManager {
       const escapedName = TextFormatter.escapeHtml(tool.name);
       const escapedDesc = TextFormatter.escapeHtml(description);
       const shouldTruncate = description.length > 120;
+      const showToggle = shouldTruncate;
       
       html += `
         <div class="tool-item">
@@ -446,7 +447,7 @@ class OptionsManager {
             <div class="tool-description${shouldTruncate ? ' truncated' : ''}" title="${escapedDesc}">
               ${escapedDesc}
             </div>
-            ${shouldTruncate ? `<button class="tool-desc-toggle" data-desc-toggle data-service-id="${id}">展开说明</button>` : ''}
+            ${showToggle ? `<button class="tool-desc-toggle" data-desc-toggle data-service-id="${id}">展开说明</button>` : ''}
           </div>
           <label class="toggle tool-toggle-auto" title="开启后AI调用此工具时将自动执行">
             <input type="checkbox" ${isAutoExecute ? 'checked' : ''} 
