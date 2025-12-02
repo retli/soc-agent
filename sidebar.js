@@ -457,6 +457,58 @@ class AIChat {
     }
   }
 
+  getConversationOwnerEmails(conversation) {
+    if (!conversation) return [];
+    this.ensureConversationMetadata(conversation);
+    const emails = conversation.metadata.ownerEmails;
+    return Array.isArray(emails) ? emails : [];
+  }
+
+  extractOwnerEmails(text = '') {
+    if (!text) {
+      return { ownerEmails: [], allEmails: [] };
+    }
+    const emailRegex = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+    const allEmails = [...new Set(text.match(emailRegex) || [])];
+    const ownerRegex = /(?:owner|资产负责人|负责人|所有者)[^@\n]{0,40}?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/gi;
+    const ownerMatches = [];
+    let match;
+    while ((match = ownerRegex.exec(text)) !== null) {
+      ownerMatches.push(match[1]);
+    }
+    const ownerEmails = [...new Set(ownerMatches)];
+    return { ownerEmails, allEmails };
+  }
+
+  detectAndStoreOwnerEmails(source) {
+    let parsed;
+    if (Array.isArray(source)) {
+      parsed = { ownerEmails: source };
+    } else {
+      parsed = this.extractOwnerEmails(source);
+    }
+    const ownerEmails = parsed.ownerEmails || [];
+    if (!ownerEmails.length) return;
+    const conversation = this.getCurrentConversation();
+    if (!conversation) return;
+    this.ensureConversationMetadata(conversation);
+    const existing = new Set((conversation.metadata.ownerEmails || []).map(email => email.toLowerCase()));
+    let updated = false;
+    ownerEmails.forEach(email => {
+      const lower = email.toLowerCase();
+      if (!existing.has(lower)) {
+        existing.add(lower);
+        updated = true;
+      }
+    });
+    if (updated) {
+      conversation.metadata.ownerEmails = Array.from(existing);
+      conversation.metadata.ownerEmailUpdatedAt = new Date().toISOString();
+      this.saveConversations();
+      logger.info('[OwnerEmail] Detected owner emails:', conversation.metadata.ownerEmails);
+    }
+  }
+
   getConversationHistoryWithContext(conversation, overrideHistory = null) {
     if (!conversation) {
       return overrideHistory || [];
@@ -582,6 +634,9 @@ class AIChat {
         }
         
         this.saveConversations();
+        if (role === MESSAGE_ROLES.USER || role === MESSAGE_ROLES.ASSISTANT) {
+          this.detectAndStoreOwnerEmails(content);
+        }
       }
     }
   }
@@ -1661,6 +1716,16 @@ ${toolsList}
         // 继续执行，即使获取工具失败
       }
       
+      let ownerEmailSection = '';
+      if (context.ownerEmails && context.ownerEmails.length > 0) {
+        ownerEmailSection = `## Owner邮箱
+检测到资产Owner邮箱：${context.ownerEmails.join(', ')}
+- 至少包含一条使用 open_compose_window 草拟邮件的建议，说明邮件目的、收件人及需要同步的要点
+- 如果需要沟通，请在建议中直接写明“使用 open_compose_window 通知 ${context.ownerEmails[0]} ……”
+
+`;
+      }
+
       // 构建针对事件响应的智能prompt
       const suggestPrompt = `你是一位资深的SOC安全分析师，擅长事件响应和威胁调查。
 
@@ -1674,7 +1739,7 @@ ${context.toolResults}
 ` : ''}${context.entities ? `## 关键实体
 ${context.entities}
 
-` : ''}${availableToolsText}
+` : ''}${availableToolsText}${ownerEmailSection}
 
 ## 你的任务
 请分析当前的安全事件类型（如：恶意IP分析、恶意软件感染、可疑登录、漏洞利用、数据泄露、内部威胁等），然后提供2-3条最有价值的后续行动建议。
@@ -1824,6 +1889,16 @@ ${context.entities}
     
     if (entities.length > 0) {
       context.entities = entities.join('\n');
+    }
+
+    // Owner 邮箱/通用邮箱
+    const emailInfo = this.extractOwnerEmails(text);
+    if (emailInfo.allEmails && emailInfo.allEmails.length > 0) {
+      context.emails = emailInfo.allEmails.slice(0, 5);
+    }
+    if (emailInfo.ownerEmails && emailInfo.ownerEmails.length > 0) {
+      context.ownerEmails = emailInfo.ownerEmails;
+      this.detectAndStoreOwnerEmails(emailInfo.ownerEmails);
     }
     
     return context;
@@ -2564,6 +2639,7 @@ ${context.entities}
         
         // 🔧 重要：持久化保存到storage
         this.saveConversations();
+        this.detectAndStoreOwnerEmails(messageContent);
         logger.info('[Stream] Assistant message saved to history, content length:', messageContent.length, 'tool_calls:', toolCalls?.length || 0);
       }
       
@@ -2842,6 +2918,14 @@ ${context.entities}
 - 在Reasoning中解释为什么需要资产Owner信息，并在Acting中第一步调用该工具，等结果返回后再决定是否调用其他工具。
 - 如果调用失败或返回结果为空，需要在Observation中说明原因，并考虑是否重试或提示用户补充信息。
 `;
+    const conversation = typeof this.getCurrentConversation === 'function' ? this.getCurrentConversation() : null;
+    const ownerEmails = this.getConversationOwnerEmails(conversation);
+    const ownerGuidance = ownerEmails.length > 0 ? `
+### 📧 Owner邮箱通知优先级
+- 检测到资产Owner邮箱：${ownerEmails.join(', ')}
+- 如需通知或同步，请优先调用工具 **open_compose_window** 草拟邮件（暂不发送），明确邮件目的、需要同步的信息以及收件人。
+- 写明要通知的具体邮箱，并保持邮件内容完整、可直接发送。
+` : '';
     
     return `你是一位资深的SOC（安全运营中心）安全分析师，专门负责安全事件响应、威胁调查和应急处理。你使用ReAct（Reasoning-Acting）模式进行安全分析和事件响应。
 
@@ -2886,7 +2970,7 @@ ReAct是一个循环迭代的过程，包含以下步骤：
 
 如果不需要调用工具，可以跳过此部分。
 
-${criticalToolsGuidance}
+${criticalToolsGuidance}${ownerGuidance}
 
 ### 3. 观察 (Observation)
 当安全工具执行完成后，分析工具返回的威胁情报、日志数据或资产信息。
@@ -4872,30 +4956,30 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       // 确保只在最终结果出现后才生成建议行动（没有tool_calls，流式响应完全结束）
       const hasToolCalls = toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0;
       
-      if (!hasToolCalls) {
-        this.tryCompleteReActRun(fullContent || '');
-      }
+    if (!hasToolCalls) {
+      this.tryCompleteReActRun(fullContent || '');
+    }
       
-      logger.debug('[SuggestedActions] Config check after tool execution:', {
-        fullContent: !!fullContent,
-        fullContentLength: fullContent?.length || 0,
-        enableSuggestedActions: this.config.enableSuggestedActions,
-        hasToolCalls: hasToolCalls,
-        willGenerate: fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()
-      });
+    logger.debug('[SuggestedActions] Config check after tool execution:', {
+      fullContent: !!fullContent,
+      fullContentLength: fullContent?.length || 0,
+      enableSuggestedActions: this.config.enableSuggestedActions,
+      hasToolCalls: hasToolCalls,
+      willGenerate: fullContent && fullContent.trim().length > 0 && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()
+    });
       
-      const suggestionContentAfterTools = this.getReActFinalContent(fullContent);
-      if (suggestionContentAfterTools && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
-        logger.debug('[SuggestedActions] Generating after tool execution');
-        try {
-          await this.generateSuggestedActions(suggestionContentAfterTools, originalQuery);
-        } catch (suggestError) {
-          logger.error('[BatchExecute] Error generating suggestions:', suggestError);
-          // 建议生成失败不应该影响主流程
-        }
-      } else if (hasToolCalls) {
-        logger.debug('[SuggestedActions] Skipping generation - tool calls detected, will generate after next tool execution');
+    const suggestionContentAfterTools = this.getReActFinalContent(fullContent);
+    if (suggestionContentAfterTools && !hasToolCalls && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
+      logger.debug('[SuggestedActions] Generating after tool execution');
+      try {
+        await this.generateSuggestedActions(suggestionContentAfterTools, originalQuery);
+      } catch (suggestError) {
+        logger.error('[BatchExecute] Error generating suggestions:', suggestError);
+        // 建议生成失败不应该影响主流程
       }
+    } else if (hasToolCalls) {
+      logger.debug('[SuggestedActions] Skipping generation - tool calls detected, will generate after next tool execution');
+    }
       
       // 🔧 修复：确保最终UI状态正确，滚动到底部
       this.scrollToBottom();
@@ -5164,6 +5248,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         conversation.metadata.thehiveCaseId = caseId;
         conversation.metadata.thehiveUpdatedAt = new Date().toISOString();
         this.saveConversations();
+        this.detectAndStoreOwnerEmails(commentsText);
         logger.info('[TheHive] Comments stored in conversation metadata for context');
       }
       
