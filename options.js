@@ -425,7 +425,7 @@ class OptionsManager {
     `;
     html += `<div data-tools-list data-service-id="${id}" class="tools-list">`;
     
-    tools.slice(0, 20).forEach(tool => {
+    tools.forEach(tool => {
       const toolKey = `${id}:${tool.name}`;
       const isEnabled = this.toolsEnabled[toolKey] !== false; // 默认启用
       const isAutoExecute = this.toolsAutoExecute[toolKey] === true; // 默认不自动执行
@@ -457,10 +457,6 @@ class OptionsManager {
         </div>
       `;
     });
-    
-    if (tools.length > 20) {
-      html += `<div style="color: #9ca3af; font-size: 11px; text-align: center; padding: 4px;">... 还有 ${tools.length - 20} 个工具</div>`;
-    }
     
     html += '</div>';
     el.innerHTML = html;

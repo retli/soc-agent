@@ -286,7 +286,8 @@ export class TextFormatter {
         .trim();
       
       uniqueTools.forEach(tool => {
-        cleanText = cleanText.replace(new RegExp(tool, 'gi'), '');
+        const escapedTool = tool.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        cleanText = cleanText.replace(new RegExp(escapedTool, 'gi'), '');
       });
       cleanText = cleanText.replace(/\s+/g, ' ').trim();
       
