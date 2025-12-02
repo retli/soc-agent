@@ -59,6 +59,14 @@
       overflow-wrap: break-word;
     }
     
+    .header-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      box-shadow: none;
+      flex-shrink: 0;
+    }
+    
     .header-actions {
       display: flex;
       gap: 8px;
@@ -419,7 +427,10 @@
 </head>
 <body>
   <div class="header">
-    <h1 id="headerTitle">💬 AI SOC Chat</h1>
+    <h1 id="headerTitle">
+      <img src="icons/icon48.png" alt="AI SOC Chat" class="header-logo">
+      <span>AI SOC Chat</span>
+    </h1>
     <div class="header-actions">
       <!-- TheHive 按钮现在在页面右上角，这里保留备用 -->
       <!-- <button class="btn btn-thehive" id="loadTheHiveBtn" style="display: none;" title="加载 TheHive Case">

@@ -49,6 +49,12 @@ import { DEFAULT_CONFIG } from './src/config/defaults.js';
 import { TheHiveIntegration } from './src/services/thehive-integration.js';
 import { URLMatcher } from './src/utils/url-matcher.js';
 
+const DEFAULT_SECURITY_PROMPTS = [
+  '如何隔离受感染主机并保留取证证据？',
+  '有没有可行的办法同时通知资产Owner与值班团队？',
+  '帮我梳理本事件需要重点监控的日志与告警指标？'
+];
+
 class AIChat {
   constructor() {
     this.conversations = [];
@@ -1655,18 +1661,6 @@ ${toolsList}
         // 继续执行，即使获取工具失败
       }
       
-      const ownerEmailSection = context.ownerEmail ? `## Owner邮箱
-检测到资产Owner邮箱：${context.ownerEmail}
-
-` : '';
-      
-      const emailStrategySection = `## 邮件通知策略
-- “邮件通知工具”对应 MCP 工具 **open_compose_window**（用于打开邮件编写窗口，仅草拟邮件，暂不发送）。
-- 默认应优先考虑使用 open_compose_window 草拟邮件通知资产 Owner 或关键干系人，但若场景不需要邮件沟通可跳过。
-${context.ownerEmail ? `- 已识别资产 Owner 邮箱：${context.ownerEmail}，请优先考虑生成一条使用 open_compose_window、面向该邮箱的通知建议，并说明目的。` : '- 如果上下文出现资产 Owner / 责任人邮箱，请在邮件通知建议中明确该邮箱并使用 open_compose_window 草拟邮件。'}
-- 如生成邮件通知建议，请写明通知目标、目的和需要同步的关键信息。
-`;
-      
       // 构建针对事件响应的智能prompt
       const suggestPrompt = `你是一位资深的SOC安全分析师，擅长事件响应和威胁调查。
 
@@ -1680,7 +1674,7 @@ ${context.toolResults}
 ` : ''}${context.entities ? `## 关键实体
 ${context.entities}
 
-` : ''}${availableToolsText}${ownerEmailSection}${emailStrategySection}
+` : ''}${availableToolsText}
 
 ## 你的任务
 请分析当前的安全事件类型（如：恶意IP分析、恶意软件感染、可疑登录、漏洞利用、数据泄露、内部威胁等），然后提供2-3条最有价值的后续行动建议。
@@ -1695,11 +1689,11 @@ ${context.entities}
 ## 建议要求
 1. 简短精准（10-20字）
 2. 可直接执行
-3. 工具使用整体可选；若使用，请写明工具名称（格式：使用 [工具名称] 执行 [操作]）
-4. 优先考虑通过 **open_compose_window** 草拟邮件同步关键信息；若发现资产 Owner/负责人邮箱，请尽量在邮件建议中点名该邮箱
-5. 邮件通知仅需草拟内容，不直接发送，邮件建议需说明通知目的
-6. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
-7. 按紧急程度排序，高危情况下第一条必须是紧急处置动作
+3. **工具使用是可选的**：只有当工具确实有助于解决问题时才推荐使用工具。如果不需要工具就能给出有效建议，可以直接给出建议。
+4. 如果建议使用工具，可以明确指定工具名称（格式：使用 [工具名称] 执行 [操作]）
+5. 符合事件响应流程（检测→分析→遏制→根除→恢复→总结）
+6. 按紧急程度排序
+7. 如果是高危情况，第一条必须是紧急处置动作
 
 ## 输出格式（纯JSON，不要markdown代码块）
 {
@@ -1814,18 +1808,6 @@ ${context.entities}
     if (domains) {
       const uniqueDomains = [...new Set(domains.map(d => d.toLowerCase()))].slice(0, 2);
       entities.push(`域名: ${uniqueDomains.join(', ')}`);
-    }
-    
-    // 邮箱与Owner邮箱
-    const emailMatches = text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
-    if (emailMatches) {
-      const uniqueEmails = [...new Set(emailMatches.map(e => e.toLowerCase()))];
-      context.emails = uniqueEmails;
-      entities.push(`邮箱: ${uniqueEmails.slice(0, 3).join(', ')}`);
-    }
-    const ownerEmailMatch = text.match(/(?:owner|资产负责人|负责人|所有者)\s*(?:[:：-]?\s*)?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
-    if (ownerEmailMatch) {
-      context.ownerEmail = ownerEmailMatch[1];
     }
     
     // CVE编号
@@ -5037,30 +5019,57 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
 
   parseTheHiveSuggestions(commentsText) {
     if (!commentsText) return [];
+    const normalized = commentsText.replace(/\r/g, '').trim();
+    if (!normalized) return [];
     
-    const normalizedText = commentsText.replace(/\r/g, '').trim();
-    if (!normalizedText) return [];
+    let suggestionSection = '';
     
-    // TheHive comments由“---”分隔，这里只提取包含“建议”关键字的片段，避免将非建议内容误解析
-    const commentBlocks = normalizedText
-      .split(/\n?-{3,}\n?/g)
-      .map(block => block.trim())
+    // 优先匹配形如 “=== 建议 === ... ===” 的段落
+    const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
+    const sectionMatch = sectionRegex.exec(normalized);
+    if (sectionMatch && sectionMatch[2]) {
+      suggestionSection = sectionMatch[2].trim();
+    }
+    
+    // 退化：直接匹配 “建议:” 关键字
+    if (!suggestionSection) {
+      const keywordMatch = normalized.match(/建议[：:]\s*([\s\S]+)/i);
+      if (keywordMatch && keywordMatch[1]) {
+        suggestionSection = keywordMatch[1].trim();
+      }
+    }
+    
+    if (!suggestionSection) {
+      return [];
+    }
+    
+    // 如果后续还有新的 === 段落，截断
+    const stopIndex = suggestionSection.indexOf('===');
+    if (stopIndex > -1) {
+      suggestionSection = suggestionSection.substring(0, stopIndex).trim();
+    }
+    
+    if (!suggestionSection || /^暂无/i.test(suggestionSection)) {
+      return [];
+    }
+    
+    const segments = suggestionSection
+      .split(/(?=\n?\s*\d+\s*[\.、\)\）])/)
+      .map(seg => seg.replace(/^\s*\d+\s*[\.、\)\）]/, '').trim())
       .filter(Boolean);
     
-    const candidateBlocks = commentBlocks.filter(block => /建议[：:]/i.test(block));
-    const candidateText = candidateBlocks.length > 0 ? candidateBlocks.join('\n') : normalizedText;
-    
-    const match = candidateText.match(/建议[：:]\s*([\s\S]+)/i);
-    const section = match ? match[1] : candidateText;
-    const cleaned = section.trim();
-    if (!cleaned) return [];
-    
-    const segments = cleaned
-      .split(/(?=\d+\s*[\.、\)\）])/)
-      .map(seg => seg.replace(/^\d+\s*[\.、\)\）]/, '').trim())
-      .filter(Boolean);
+    if (segments.length === 0) {
+      return suggestionSection
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 4 && !/^建议/.test(line));
+    }
     
     return segments;
+  }
+
+  getDefaultSecurityPrompts() {
+    return DEFAULT_SECURITY_PROMPTS.slice();
   }
 
   renderTheHiveSuggestions(suggestions) {
@@ -5120,6 +5129,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         this.renderTheHiveSuggestions(hiveSuggestions);
       } else {
         logger.info('[TheHive] No structured suggestions found in comments');
+        const fallbackPrompts = this.getDefaultSecurityPrompts();
+        if (fallbackPrompts.length > 0) {
+          this.renderTheHiveSuggestions(fallbackPrompts, '安全防护提问建议');
+        }
       }
       
       // 将 comments 保存到当前对话的上下文中

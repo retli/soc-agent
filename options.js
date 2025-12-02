@@ -430,26 +430,30 @@ class OptionsManager {
       const isEnabled = this.toolsEnabled[toolKey] !== false; // 默认启用
       const isAutoExecute = this.toolsAutoExecute[toolKey] === true; // 默认不自动执行
       const description = tool.description || '无描述';
+      const escapedName = TextFormatter.escapeHtml(tool.name);
+      const escapedDesc = TextFormatter.escapeHtml(description);
+      const shouldTruncate = description.length > 120;
       
       html += `
         <div class="tool-item">
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <label class="toggle tool-toggle-small">
-              <input type="checkbox" ${isEnabled ? 'checked' : ''} 
-                     data-tool-toggle data-service-id="${id}" data-tool-name="${TextFormatter.escapeHtml(tool.name)}">
-              <span class="toggle-slider"></span>
-            </label>
-            <div style="flex: 1;">
-              <div class="tool-name">${TextFormatter.escapeHtml(tool.name)}</div>
-              <div class="tool-description">${TextFormatter.escapeHtml(description)}</div>
+          <label class="toggle tool-toggle-small">
+            <input type="checkbox" ${isEnabled ? 'checked' : ''} 
+                   data-tool-toggle data-service-id="${id}" data-tool-name="${escapedName}">
+            <span class="toggle-slider"></span>
+          </label>
+          <div class="tool-info">
+            <div class="tool-name">${escapedName}</div>
+            <div class="tool-description${shouldTruncate ? ' truncated' : ''}" title="${escapedDesc}">
+              ${escapedDesc}
             </div>
-            <label class="toggle tool-toggle-auto" title="开启后AI调用此工具时将自动执行">
-              <input type="checkbox" ${isAutoExecute ? 'checked' : ''} 
-                     data-tool-auto-toggle data-service-id="${id}" data-tool-name="${TextFormatter.escapeHtml(tool.name)}">
-              <span class="toggle-slider" style="background: #f59e0b;"></span>
-            </label>
-            <span style="font-size: 11px; color: #9ca3af; min-width: 40px;">${isAutoExecute ? '自动' : '手动'}</span>
+            ${shouldTruncate ? `<button class="tool-desc-toggle" data-desc-toggle data-service-id="${id}">展开说明</button>` : ''}
           </div>
+          <label class="toggle tool-toggle-auto" title="开启后AI调用此工具时将自动执行">
+            <input type="checkbox" ${isAutoExecute ? 'checked' : ''} 
+                   data-tool-auto-toggle data-service-id="${id}" data-tool-name="${escapedName}">
+            <span class="toggle-slider" style="background: #f59e0b;"></span>
+          </label>
+          <span style="font-size: 11px; color: #9ca3af; min-width: 40px;">${isAutoExecute ? '自动' : '手动'}</span>
         </div>
       `;
     });
@@ -466,6 +470,9 @@ class OptionsManager {
     
     // 绑定工具开关事件
     this.bindToolToggleEvents(id);
+    
+    // 绑定描述展开事件
+    this.bindToolDescriptionToggle(id);
   }
 
   bindToolsListToggle(serviceId) {
@@ -526,6 +533,23 @@ class OptionsManager {
         }
         
         logger.info(`[Tool] ${e.target.checked ? 'Auto-execute enabled' : 'Auto-execute disabled'} for tool: ${toolName}`);
+      });
+    });
+  }
+
+  bindToolDescriptionToggle(serviceId) {
+    const el = document.getElementById(`toolsResult-${serviceId}`);
+    if (!el) return;
+    
+    const buttons = el.querySelectorAll('[data-desc-toggle]');
+    buttons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const toolItem = btn.closest('.tool-item');
+        if (!toolItem) return;
+        const desc = toolItem.querySelector('.tool-description');
+        if (!desc) return;
+        const expanded = desc.classList.toggle('expanded');
+        btn.textContent = expanded ? '收起说明' : '展开说明';
       });
     });
   }
