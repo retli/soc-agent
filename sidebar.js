@@ -5049,6 +5049,12 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       suggestionSection = suggestionSection.substring(0, stopIndex).trim();
     }
     
+    // 截断下一个 comments 分隔符（---），避免串入其他留言
+    const delimiterMatch = suggestionSection.search(/\n-{3,}\s*/);
+    if (delimiterMatch > -1) {
+      suggestionSection = suggestionSection.substring(0, delimiterMatch).trim();
+    }
+    
     if (!suggestionSection || /^暂无/i.test(suggestionSection)) {
       return [];
     }
