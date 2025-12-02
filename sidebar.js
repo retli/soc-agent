@@ -2829,6 +2829,20 @@ ${context.entities}
    */
   buildSystemPromptForFunctionCalling() {
     // 🔒 SOC安全应急响应场景的系统提示词，使用ReAct模式支持循环推理
+    const criticalTools = [
+      {
+        name: 'findowner-mcp-query_asset_info',
+        description: '用于查询内网IP对应的资产Owner信息，处理内网IP事件时必须优先调用'
+      }
+    ];
+    
+    const criticalToolsGuidance = `
+### 🌐 内网资产查询优先级
+- 当用户的问题涉及内网IP、终端或资产归属时，请**优先调用**工具 **findowner-mcp-query_asset_info**，除非已明确说明无需查询。
+- 在Reasoning中解释为什么需要资产Owner信息，并在Acting中第一步调用该工具，等结果返回后再决定是否调用其他工具。
+- 如果调用失败或返回结果为空，需要在Observation中说明原因，并考虑是否重试或提示用户补充信息。
+`;
+    
     return `你是一位资深的SOC（安全运营中心）安全分析师，专门负责安全事件响应、威胁调查和应急处理。你使用ReAct（Reasoning-Acting）模式进行安全分析和事件响应。
 
 ## ReAct模式核心逻辑
@@ -2871,6 +2885,8 @@ ReAct是一个循环迭代的过程，包含以下步骤：
 - 如果一个问题需要多个工具协同调查，可以在Function Calling中同时选择多个工具，系统会综合执行结果
 
 如果不需要调用工具，可以跳过此部分。
+
+${criticalToolsGuidance}
 
 ### 3. 观察 (Observation)
 当安全工具执行完成后，分析工具返回的威胁情报、日志数据或资产信息。
