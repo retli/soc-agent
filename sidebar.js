@@ -50,8 +50,8 @@ import { TheHiveIntegration } from './src/services/thehive-integration.js';
 import { URLMatcher } from './src/utils/url-matcher.js';
 
 const DEFAULT_SECURITY_PROMPTS = [
-  '如何隔离受感染主机并保留取证证据？',
-  '有没有可行的办法同时通知资产Owner与值班团队？',
+  '简述该告警并分析',
+  '分析该告警并发送报告给Owner',
   '帮我梳理本事件需要重点监控的日志与告警指标？'
 ];
 
@@ -1076,9 +1076,11 @@ class AIChat {
         </div>
       `;
       
-      executeBtn.innerHTML = '<span class="btn-icon">✗</span> 失败';
-      executeBtn.style.backgroundColor = '#ef4444';
+      executeBtn.disabled = false;
       cancelBtn.disabled = false;
+      argInputs.forEach(input => input.disabled = false);
+      executeBtn.innerHTML = '<span class="btn-icon">↻</span> 重试';
+      executeBtn.style.backgroundColor = '#f97316';
     }
   }
   
@@ -2926,8 +2928,16 @@ ${context.entities}
 - 如需通知或同步，请优先调用工具 **open_compose_window** 草拟邮件（暂不发送），明确邮件目的、需要同步的信息以及收件人。
 - 写明要通知的具体邮箱，并保持邮件内容完整、可直接发送。
 ` : '';
+    const preAnalyzedReportGuidance = `
+### 📄 已有分析报告的常态
+- 当前对话输入通常是其他分析同事已整理好的安全报告或调查摘要，除非用户明确要求重新取证。
+- 优先在既有报告基础上提炼关键信息、补充洞察或给出下一步建议，不要机械地从零复述完整排查流程。
+- 仅当报告缺失关键证据、存在冲突信息或用户提出新的调查问题时，才触发新的ReAct循环并考虑调用工具获取补充数据。
+`;
     
     return `你是一位资深的SOC（安全运营中心）安全分析师，专门负责安全事件响应、威胁调查和应急处理。你使用ReAct（Reasoning-Acting）模式进行安全分析和事件响应。
+
+${preAnalyzedReportGuidance}
 
 ## ReAct模式核心逻辑
 
@@ -2941,6 +2951,8 @@ ReAct是一个循环迭代的过程，包含以下步骤：
 - 评估威胁级别（高危/中危/低危）
 - 分析影响范围（受影响资产、数据、系统）
 - 确定调查方向（威胁情报、日志分析、网络流量、端点检测等）
+- 判断当前报告是否已充分回答问题：若信息完备，请直接基于现有内容给出结论；若存在缺口，明确指出缺失数据
+- 只有当报告缺失关键证据时才规划新的工具调用，并说明补充目标
 
 格式：**Reasoning:** [你的安全分析推理过程]
 
@@ -5122,41 +5134,89 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     const normalized = commentsText.replace(/\r/g, '').trim();
     if (!normalized) return [];
     
-    let suggestionSection = '';
-    
-    // 优先匹配形如 “=== 建议 === ... ===” 的段落
-    const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
-    const sectionMatch = sectionRegex.exec(normalized);
-    if (sectionMatch && sectionMatch[2]) {
-      suggestionSection = sectionMatch[2].trim();
-    }
-    
-    // 退化：直接匹配 “建议:” 关键字
-    if (!suggestionSection) {
-      const keywordMatch = normalized.match(/建议[：:]\s*([\s\S]+)/i);
-      if (keywordMatch && keywordMatch[1]) {
-        suggestionSection = keywordMatch[1].trim();
+    const extractSuggestionSection = () => {
+      const bracketRegex = /【\s*[^\n【】]*?(?:调查)?建议[^\n【】]*】([\s\S]*?)(?=(?:\n\s*【)|(?:\n\s*===)|\Z)/i;
+      const bracketMatch = bracketRegex.exec(normalized);
+      if (bracketMatch && bracketMatch[1]) {
+        return bracketMatch[1].trim();
       }
-    }
+      
+      const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
+      const sectionMatch = sectionRegex.exec(normalized);
+      if (sectionMatch && sectionMatch[2]) {
+        return sectionMatch[2].trim();
+      }
+      
+      const keywordMatch = normalized.match(/(?:调查)?建议[：:]\s*([\s\S]+)/i);
+      if (keywordMatch && keywordMatch[1]) {
+        return keywordMatch[1].trim();
+      }
+      
+      return '';
+    };
     
-    if (!suggestionSection) {
-      return [];
-    }
+    const cleanSuggestionSection = (sectionText) => {
+      if (!sectionText) return '';
+      let section = sectionText;
+      
+      const stopIndex = section.indexOf('===');
+      if (stopIndex > -1) {
+        section = section.substring(0, stopIndex).trim();
+      }
+      
+      const delimiterMatch = section.search(/\n-{3,}\s*/);
+      if (delimiterMatch > -1) {
+        section = section.substring(0, delimiterMatch).trim();
+      }
+      
+      return section.trim();
+    };
     
-    // 如果后续还有新的 === 段落，截断
-    const stopIndex = suggestionSection.indexOf('===');
-    if (stopIndex > -1) {
-      suggestionSection = suggestionSection.substring(0, stopIndex).trim();
-    }
+    const collectNumberedSegments = (sectionText) => {
+      const lines = sectionText.split('\n');
+      const segments = [];
+      let current = null;
+      
+      const pushCurrent = () => {
+        if (!current) return;
+        const formatted = current
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean)
+          .join(' ');
+        if (formatted.length > 0) {
+          segments.push(formatted);
+        }
+        current = null;
+      };
+      
+      lines.forEach(rawLine => {
+        const line = rawLine.trimEnd();
+        const numberMatch = line.match(/^\s*(\d+)\s*[\.、\)\）]\s*(.*)$/);
+        if (numberMatch) {
+          pushCurrent();
+          const [, , rest = ''] = numberMatch;
+          current = rest.trim();
+          return;
+        }
+        
+        if (current !== null) {
+          current += (current.length > 0 ? '\n' : '') + line.trim();
+        }
+      });
+      
+      pushCurrent();
+      return segments;
+    };
     
-    // 截断下一个 comments 分隔符（---），避免串入其他留言
-    const delimiterMatch = suggestionSection.search(/\n-{3,}\s*/);
-    if (delimiterMatch > -1) {
-      suggestionSection = suggestionSection.substring(0, delimiterMatch).trim();
-    }
-    
+    let suggestionSection = cleanSuggestionSection(extractSuggestionSection());
     if (!suggestionSection || /^暂无/i.test(suggestionSection)) {
       return [];
+    }
+    
+    const numberedSegments = collectNumberedSegments(suggestionSection);
+    if (numberedSegments.length > 0) {
+      return numberedSegments;
     }
     
     const segments = suggestionSection
