@@ -1513,13 +1513,6 @@ class AIChat {
         return true;
       }
       
-      // 展示工具计划
-      const planMessage = this.formatToolPlanningMessage(planningResult);
-      if (planMessage) {
-        this.appendMessage(MESSAGE_ROLES.ASSISTANT, planMessage);
-        this.saveConversations();
-      }
-      
       // 构建模拟 tool_calls 并交给现有逻辑处理
       const syntheticToolCalls = this.buildSyntheticToolCalls(planningResult.tools);
       const functionDefinitions = this.buildFunctionDefinitionsForTools(
@@ -1529,6 +1522,13 @@ class AIChat {
       if (!syntheticToolCalls.length || !functionDefinitions.length) {
         logger.warn('[ToolPlanning] Failed to build synthetic tool calls, fallback to legacy flow');
         return false;
+      }
+      
+      // 展示工具计划
+      const planMessage = this.formatToolPlanningMessage(planningResult);
+      if (planMessage) {
+        this.appendMessage(MESSAGE_ROLES.ASSISTANT, planMessage);
+        this.saveConversations();
       }
       
       await this.handleFunctionCalls(syntheticToolCalls, functionDefinitions, message, 0);
