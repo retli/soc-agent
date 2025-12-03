@@ -1262,16 +1262,6 @@ class AIChat {
       let systemPrompt = null;
       const options = {};
       
-      // 准备Function Calling工具
-      // 🔧 修复：确保functions总是数组，防止未定义错误
-      const functions = await this.prepareFunctions() || [];
-      if (functions.length > 0) {
-        systemPrompt = this.buildSystemPromptForFunctionCalling();
-        options.tools = FunctionCallAdapter.cleanFunctionsForAPI(functions);
-        options.tool_choice = 'auto';  // 允许AI根据需要调用工具
-        logger.debug('[Tool Format] Function Calling enabled with', functions.length, 'tools');
-      }
-      
       // 包含对话历史的消息
       const historyWithContext = this.getConversationHistoryWithContext(conversation);
       const messages = this.aiService.buildMessages(
@@ -1286,13 +1276,11 @@ class AIChat {
       
       // 处理流式响应
       let fullContent = '';
-      let toolCallsFromStream = null;
       if (response.stream) {
         // 🔧 修复：handleStreamResponse现在返回对象
         const streamResult = await this.handleStreamResponse(response);
         if (typeof streamResult === 'object' && streamResult !== null) {
           fullContent = streamResult.content || '';
-          toolCallsFromStream = streamResult.tool_calls || null;
         } else {
           fullContent = streamResult || '';
         }
@@ -1305,40 +1293,9 @@ class AIChat {
         }
       }
       
-      // 🔧 修复：优先使用流式响应返回的tool_calls
-      // 🔧 增强：传递递归深度，防止无限循环
-      // 🔧 修复：确保toolCalls是数组，防止未定义错误
-      const toolCalls = toolCallsFromStream || response.tool_calls;
-      if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
-        logger.info('[Tool Format] 🔁 ReAct循环：AI请求继续调用工具');
-        // 🔧 修复：确保functions总是数组，防止未定义错误
-        const functions = await this.prepareFunctions() || [];
-        // 🔧 修复：确保异步操作完成，防止卡死
-        try {
-          // 🔧 修复：如果fullContent为空但有tool_calls，移除"无内容"消息，让工具调用正常进行
-          if (!fullContent || fullContent.trim().length === 0) {
-            logger.info('[Tool Format] Removing empty content message, proceeding with tool calls');
-            const messagesEl = document.getElementById('messages');
-            const lastMessage = messagesEl.lastElementChild;
-            if (lastMessage && lastMessage.classList.contains('assistant')) {
-              const contentDiv = lastMessage.querySelector('.message-content');
-              if (contentDiv && (contentDiv.textContent.includes('无内容') || contentDiv.textContent.includes('未收到内容') || contentDiv.textContent.includes('流式响应完成'))) {
-                lastMessage.remove();
-                logger.info('[Tool Format] Removed empty content message');
-              }
-            }
-          }
-          await this.handleFunctionCalls(toolCalls, functions, originalQuery, 1);  // 从深度1开始
-        } catch (toolCallError) {
-          logger.error('[Tool Format] Error in additional tool calls:', toolCallError);
-          // 即使工具调用失败，也不应该卡死，继续显示当前结果
-        }
-      } else {
-        logger.debug('[Tool Format] ✅ AI已完成分析，没有请求更多工具调用');
-        this.tryCompleteReActRun(fullContent || response.content || '');
-        // 🔧 修复：确保UI已更新，滚动到底部
-        this.scrollToBottom();
-      }
+      this.tryCompleteReActRun(fullContent || response.content || '');
+      // 🔧 修复：确保UI已更新，滚动到底部
+      this.scrollToBottom();
       
       // 🔧 修复：确保最终UI状态正确
       this.scrollToBottom();
@@ -1772,39 +1729,19 @@ class AIChat {
         responseLength: context.response.length
       });
       
-      // 🔧 获取可用的MCP工具列表
+      // 🔧 获取可用工具目录（Skills风格）
       let availableToolsText = '';
-      try {
-        const functions = await this.prepareFunctions();
-        if (functions && functions.length > 0) {
-          // 格式化工具列表为可读文本
-          const toolsList = functions.map((func, index) => {
-            const toolName = func.function?.name || func.name || '未知工具';
-            const toolDesc = func.function?.description || func.description || '无描述';
-            const params = func.function?.parameters || func.parameters || {};
-            const paramNames = Object.keys(params.properties || {}).join(', ') || '无参数';
-            return `${index + 1}. ${toolName}: ${toolDesc} (参数: ${paramNames})`;
-          }).join('\n');
-          
-          availableToolsText = `## 可用工具列表（可选参考）
-以下是当前可用的MCP工具，你可以**根据具体情况**在建议中引用这些工具：
+      const toolSummary = this.buildToolDirectorySummary();
+      if (toolSummary?.text) {
+        availableToolsText = `## 可用Skills（可选参考）
+${toolSummary.text}
 
-${toolsList}
-
-**重要提示：** 
-- **工具使用是可选的**，不是必须的。只有当工具确实有助于解决问题时才推荐使用工具。
-- 如果建议使用工具，应该明确指定要使用的工具名称，格式如："使用 [工具名称] 执行 [操作描述]"
-- 如果不需要工具就能给出有效建议，可以直接给出建议，无需强制使用工具。
-- 请基于具体情况判断是否需要使用工具，不要为了使用工具而使用工具。
-`;
-          
-          logger.info('[SuggestedActions] Available tools:', functions.length);
-        } else {
-          logger.info('[SuggestedActions] No MCP tools available');
-        }
-      } catch (error) {
-        logger.warn('[SuggestedActions] Failed to get MCP tools:', error);
-        // 继续执行，即使获取工具失败
+**提示：**
+- Skills 仅在需要时才执行，避免无意义调用。
+- 如果建议使用某个 Skill，请明确写出 Skill 名称和要完成的动作。`;
+        logger.info('[SuggestedActions] Available skills in directory:', toolSummary.count);
+      } else {
+        logger.info('[SuggestedActions] No skills available for suggestions');
       }
       
       let ownerEmailSection = '';
@@ -5060,22 +4997,11 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       comprehensivePrompt += `   - **不要为了"完整性"而调用不必要的工具，不要重复调用相同类型的工具（如威胁情报、风险评估等）。**\n`;
       comprehensivePrompt += `8. 基于综合的安全数据，给出专业的安全分析、威胁评估和响应建议`;
       
-      // 准备Function Calling工具
+      // 在综合分析阶段不再提供Function Calling工具，避免再次携带全部工具定义
       let systemPrompt = null;
-      const options = {};
-      // 🔧 修复：确保functions总是数组，防止未定义错误
-      const functions = await this.prepareFunctions() || [];
-      if (functions.length > 0) {
-        systemPrompt = this.buildSystemPromptForFunctionCalling();
-        options.tools = FunctionCallAdapter.cleanFunctionsForAPI(functions);
-        options.tool_choice = 'auto';  // 🔧 允许AI继续调用工具
-      }
-      
-      // 🔧 修复：包含工具结果，让AI能看到完整的工具调用上下文，支持ReAct循环
-      // 这样AI可以：
-      // 1. 看到之前的assistant消息中的tool_calls
-      // 2. 看到对应的tool结果（标准Function Calling格式）
-      // 3. 基于这些上下文决定是否需要继续调用工具
+      const options = {
+        tool_choice: 'none'
+      };
       
       // 🔧 修复：先检查conversation history中是否有工具结果
       const rawConversationHistory = conversation ? conversation.messages : [];
@@ -5100,7 +5026,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         comprehensivePrompt,
         conversationHistoryWithContext,
         systemPrompt,
-        true  // 🔧 includeToolResults = true，让AI看到完整的工具调用上下文，支持循环调用
+        true  // includeToolResults = true，让AI看到完整上下文
       );
       
       logger.info('[BatchExecute] Built messages for AI:');
