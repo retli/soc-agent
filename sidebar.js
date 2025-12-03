@@ -1251,12 +1251,13 @@ class AIChat {
       
       // 构建提示消息：让AI基于安全工具结果进行安全分析和回答
       // 🔒 SOC安全分析师视角：强调威胁分析、事件响应、数据准确性
-      const formatPrompt = `[安全工具 ${toolName} 执行结果]\n${result}\n\n**安全分析要求：** 
-1. 请基于以上安全工具执行结果，使用工具返回的实际威胁情报、日志数据或资产信息（不是占位符）来回答用户的安全问题
-2. 如果结果是JSON格式，请解析并提取关键安全指标的实际值（威胁评分、置信度、时间戳、关联事件等）
-3. **绝对不要**使用占位符（如[IP地址]、[威胁类型]、[资产名称]等）或模板变量，必须使用真实的安全数据
+      const summarizedResult = this.summarizeToolResultForPrompt(result, 1200);
+      const formatPrompt = `[安全工具 ${toolName} 执行结果（摘要）]\n${summarizedResult}\n\n*原始结果已保存在工具执行记录中，请勿直接粘贴整段JSON。*\n\n**安全分析要求：** 
+1. 请基于以上安全工具执行结果，使用工具返回的实际威胁情报、日志数据或资产信息（不要引用占位符）
+2. 如果结果是JSON格式，请解析并提取关键安全指标的实际值（威胁评分、置信度、时间戳、关联事件等），但不要原样粘贴完整JSON
+3. **必须**使用真实数据撰写结论，可配合简洁表格或项目符号
 4. 如果工具返回的数据不完整或查询未找到结果，请明确说明，并建议是否需要调用其他工具补充调查
-5. 基于实际数据给出专业的安全分析和响应建议`;
+5. 基于实际数据给出专业的安全分析和响应建议，整体长度控制在300字以内`;
       
       // 🔧 使用对话历史构建消息，让AI看到完整上下文
       let systemPrompt = null;
@@ -3186,6 +3187,34 @@ ${directorySection}
     
     return message.trim();
   }
+
+  /**
+   * 生成发送给AI的工具结果摘要，避免直接粘贴大段JSON
+   */
+  summarizeToolResultForPrompt(result, maxLength = 800) {
+    if (result === undefined || result === null) {
+      return '(工具返回空结果)';
+    }
+    
+    let formatted = '';
+    try {
+      formatted = TextFormatter.formatToolResult(result);
+    } catch (error) {
+      logger.warn('[ToolSummary] Failed to format tool result, fallback to raw string:', error);
+      formatted = typeof result === 'string' ? result : JSON.stringify(result);
+    }
+    
+    formatted = formatted.replace(/\r/g, '').trim();
+    if (!formatted) {
+      formatted = '(工具返回空结果)';
+    }
+    
+    if (formatted.length > maxLength) {
+      formatted = `${formatted.slice(0, maxLength)}\n...(结果已截断，完整内容请查看工具执行记录)`;
+    }
+    
+    return formatted;
+  }
   
   /**
    * 构建Function Calling的System Prompt（ReAct模式）
@@ -4477,8 +4506,9 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         if (tr.error) {
           comprehensivePrompt += `❌ 执行失败: ${tr.error}\n\n`;
         } else {
+          const resultSummary = this.summarizeToolResultForPrompt(tr.result, 900);
           comprehensivePrompt += `✓ 执行成功\n`;
-          comprehensivePrompt += `结果:\n${JSON.stringify(tr.result, null, 2)}\n\n`;
+          comprehensivePrompt += `结果摘要:\n${resultSummary}\n\n`;
         }
       });
       
@@ -4985,8 +5015,8 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       comprehensivePrompt += `\n**安全综合分析要求（SOC安全分析师工作规范）：**\n`;
       comprehensivePrompt += `1. 请基于以上所有安全工具的执行结果，进行综合安全分析并回答用户的安全问题\n`;
       comprehensivePrompt += `2. **必须使用工具返回的实际安全数据**（威胁情报、日志数据、资产信息），而不是使用占位符（如[IP地址]、[威胁类型]、[资产名称]、[威胁评分]等）\n`;
-      comprehensivePrompt += `3. 如果工具返回了JSON格式的数据，请解析JSON并提取关键安全指标的实际值（威胁评分、置信度、时间戳、关联事件、受影响资产等）\n`;
-      comprehensivePrompt += `4. 如果工具返回了对象或数组，请提取其中的具体安全字段值，重点关注威胁级别、影响范围、时间线等关键信息\n`;
+      comprehensivePrompt += `3. 如果需要引用工具结果，请只引用关键字段，**不要**将完整JSON原样粘贴到回复中\n`;
+      comprehensivePrompt += `4. 输出请控制在 400 字以内，使用结构化的 Markdown（小标题 / 列表），并保持高对比度背景\n`;
       comprehensivePrompt += `5. **绝对不要**在Response中使用占位符或模板变量，必须使用工具返回的真实安全数据\n`;
       comprehensivePrompt += `6. **🔁 关键（事件响应循环）：如果某个工具返回的数据不完整、查询未找到结果、或需要更多威胁情报来评估安全事件，请在Observation中明确说明缺少的关键安全信息（威胁情报、资产信息、日志数据、历史事件等），然后继续推理并调用其他安全工具获取完整信息。这是ReAct循环的核心：基于观察结果继续推理和行动，直到获得足够信息进行安全评估。**\n`;
       comprehensivePrompt += `7. **⚠️ 重要：何时停止调用工具（最关键）：**\n`;
