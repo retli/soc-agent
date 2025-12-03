@@ -1451,6 +1451,99 @@ class AIChat {
    * 使用Function Calling发送消息（新模式）
    */
   async sendMessageWithFunctionCalling(message) {
+    this.startReActRun();
+    if (this.shouldUseToolDirectoryFlow()) {
+      const handled = await this.sendMessageWithToolDirectoryFlow(message);
+      if (handled) {
+        return;
+      }
+      logger.info('[ToolPlanning] Directory flow unavailable, falling back to legacy Function Calling');
+    }
+    await this.sendMessageWithFunctionCallingLegacy(message);
+  }
+
+  /**
+   * 目录式工具规划流程
+   */
+  async sendMessageWithToolDirectoryFlow(message) {
+    const conversation = this.getCurrentConversation();
+    
+    if (!this.mcpServices || this.mcpServices.length === 0) {
+      return false;
+    }
+    
+    if (!this.mcpToolsCache || Object.keys(this.mcpToolsCache).length === 0) {
+      await this.refreshMCPTools();
+    }
+    
+    const summary = this.buildToolDirectorySummary();
+    if (!summary || !summary.text) {
+      return false;
+    }
+    
+    try {
+      const systemPrompt = this.buildToolPlanningPrompt(summary.text);
+      const historyWithContext = this.getConversationHistoryWithContext(conversation);
+      const planningMessages = this.aiService.buildMessages(
+        message,
+        historyWithContext,
+        systemPrompt
+      );
+      
+      const planningOptions = {
+        stream: false
+      };
+      
+      const planningResponse = await this.aiService.sendMessage(planningMessages, planningOptions);
+      const planningContent = planningResponse?.content || '';
+      const planningResult = this.parseToolPlanningResponse(planningContent);
+      
+      if (!planningResult || planningResult.needTool === false || !planningResult.tools) {
+        // 视为最终回答
+        const displayContent = planningContent || '(AI 没有返回内容)';
+        this.appendMessage(MESSAGE_ROLES.ASSISTANT, displayContent);
+        this.saveConversations();
+        this.hideLoading();
+        this.tryCompleteReActRun(displayContent);
+        
+        const suggestionContent = this.getReActFinalContent(displayContent);
+        if (suggestionContent && this.config.enableSuggestedActions !== false && !this.isReActRunning()) {
+          await this.generateSuggestedActions(suggestionContent, message);
+        }
+        return true;
+      }
+      
+      // 展示工具计划
+      const planMessage = this.formatToolPlanningMessage(planningResult);
+      if (planMessage) {
+        this.appendMessage(MESSAGE_ROLES.ASSISTANT, planMessage);
+        this.saveConversations();
+      }
+      
+      // 构建模拟 tool_calls 并交给现有逻辑处理
+      const syntheticToolCalls = this.buildSyntheticToolCalls(planningResult.tools);
+      const functionDefinitions = this.buildFunctionDefinitionsForTools(
+        planningResult.tools.map(tool => tool.name)
+      );
+      
+      if (!syntheticToolCalls.length || !functionDefinitions.length) {
+        logger.warn('[ToolPlanning] Failed to build synthetic tool calls, fallback to legacy flow');
+        return false;
+      }
+      
+      await this.handleFunctionCalls(syntheticToolCalls, functionDefinitions, message, 0);
+      this.hideLoading();
+      return true;
+    } catch (error) {
+      logger.error('[ToolPlanning] Error during planning flow:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 兼容：原有的Function Calling流程
+   */
+  async sendMessageWithFunctionCallingLegacy(message) {
     const conversation = this.getCurrentConversation();
     
     // 调试：输出对话信息
@@ -1460,8 +1553,6 @@ class AIChat {
       logger.info('[Send] History message count:', conversation.messages.length);
       logger.debug('[Send] History messages:', conversation.messages);
     }
-    
-    this.startReActRun();
     
     // 1. 准备Function列表
     // 🔧 修复：确保functions总是数组，防止未定义错误
@@ -2898,6 +2989,265 @@ ${context.entities}
     );
     
     return functions;
+  }
+
+  /**
+   * 判断是否启用目录式工具规划流程
+   */
+  shouldUseToolDirectoryFlow() {
+    if (!this.mcpServices || this.mcpServices.length === 0) {
+      return false;
+    }
+    return this.mcpServices.some(service => service.enabled);
+  }
+
+  /**
+   * 汇总当前启用的工具，生成目录文本
+   */
+  buildToolDirectorySummary() {
+    if (!this.mcpServices || !this.mcpToolsCache) {
+      return null;
+    }
+    
+    const lines = [];
+    let totalTools = 0;
+    
+    for (const service of this.mcpServices) {
+      if (!service.enabled) continue;
+      const tools = this.mcpToolsCache[service.id];
+      if (!tools || tools.length === 0) continue;
+      
+      const enabledTools = tools.filter(tool => {
+        const toolKey = `${service.id}:${tool.name}`;
+        return this.toolsEnabled[toolKey] !== false;
+      });
+      
+      if (enabledTools.length === 0) continue;
+      
+      lines.push(`## Service: ${service.name}`);
+      enabledTools.forEach(tool => {
+        totalTools += 1;
+        const formatted = this.formatSkillStyleEntry(tool);
+        if (formatted) {
+          lines.push(formatted);
+        }
+      });
+      lines.push('');
+    }
+    
+    if (totalTools === 0) {
+      return null;
+    }
+    
+    return {
+      text: lines.join('\n').trim(),
+      count: totalTools
+    };
+  }
+
+  /**
+   * 将单个工具转换为 Skills 风格的条目
+   */
+  formatSkillStyleEntry(tool) {
+    if (!tool || !tool.name) return '';
+    
+    const desc = (tool.description || '无描述').replace(/\s+/g, ' ').trim();
+    const truncatedDesc = desc.length > 240 ? `${desc.slice(0, 240)}...` : desc;
+    
+    const props = tool.inputSchema?.properties || {};
+    const required = tool.inputSchema?.required || [];
+    const inputs = Object.entries(props).slice(0, 5).map(([key, schema]) => {
+      const type = schema?.type || 'string';
+      const isRequired = required.includes(key) ? 'required' : 'optional';
+      const schemaDesc = (schema?.description || '').trim();
+      const preview = schemaDesc
+        ? `${schemaDesc.length > 80 ? `${schemaDesc.slice(0, 80)}...` : schemaDesc}`
+        : '';
+      return `  - ${key} (${type}, ${isRequired})${preview ? ` – ${preview}` : ''}`;
+    });
+    const inputsSection = inputs.length > 0
+      ? inputs.join('\n')
+      : '  - 无参数\n';
+    
+    let outputHint = '';
+    if (tool.outputSchema?.description) {
+      const text = tool.outputSchema.description.trim();
+      outputHint = text.length > 120 ? `${text.slice(0, 120)}...` : text;
+    } else if (desc) {
+      // 简单提取“返回/输出”关键词
+      const match = desc.match(/返回.*?[。.;]/);
+      outputHint = match ? match[0].replace(/[。.;]/g, '') : '';
+    }
+    
+    return [
+      `### Skill: ${tool.name}`,
+      `- **Capability:** ${truncatedDesc}`,
+      `- **Inputs:**\n${inputsSection}`,
+      outputHint ? `- **Output:** ${outputHint}` : '',
+      ''
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * 构建两阶段工具规划提示词
+   */
+  buildToolPlanningPrompt(toolDirectoryText) {
+    const directorySection = toolDirectoryText
+      ? `## 可用工具目录\n${toolDirectoryText}\n`
+      : '## 可用工具目录\n当前没有可用工具。若无需工具，请直接回答。\n';
+    
+    return `你是一位资深的SOC安全分析师，负责事件响应与威胁调查。上方的“可用工具目录”与 Claude Skills 类似——每个 Skill 表示一项能力，只有在需要时才会被真正加载。
+
+${directorySection}
+
+## Skills 使用协议（两阶段）
+1. 先分析用户问题，若无需技能即可完成，请直接给出专业结论。
+2. 如需使用目录中的技能，请勿虚构结果，先输出一个JSON对象（不包含额外文本），格式如下：
+{
+  "need_tool": true,
+  "tools": [
+    {
+      "name": "技能名称（来自目录）",
+      "args": { "参数名": "参数值", ... },
+      "reason": "为什么需要该技能"
+    }
+  ],
+  "explain_to_user": "面向用户的简短说明，可选"
+}
+3. args 必须与目录描述匹配。若无需任何技能，请返回 {"need_tool": false} 或直接回答。
+4. 若需要多个技能，可在 tools 数组中列出多个条目，按执行顺序排列。
+5. 暂时不要调用 Function Calling。等我们加载对应技能后，你会再次获得使用Function Calling的机会。
+
+在收到技能的真实执行结果后，你会再次获得回答机会，届时请基于真实数据给出结论。`;
+  }
+
+  /**
+   * 解析AI输出的工具规划结果
+   */
+  parseToolPlanningResponse(content = '') {
+    if (!content) return null;
+    
+    const trimmed = content.trim();
+    let jsonText = trimmed;
+    const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (codeBlockMatch) {
+      jsonText = codeBlockMatch[1].trim();
+    }
+    
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (error) {
+      logger.debug('[ToolPlanning] Failed to parse planning JSON:', error.message);
+      return null;
+    }
+    
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    
+    const needToolRaw = parsed.need_tool ?? parsed.needTool ?? parsed.use_tool ?? parsed.useTool;
+    const needTool = needToolRaw === true || needToolRaw === 'true' || (Array.isArray(parsed.tools) && parsed.tools.length > 0);
+    if (!needTool) {
+      return { needTool: false };
+    }
+    
+    let tools = [];
+    if (Array.isArray(parsed.tools)) {
+      tools = parsed.tools;
+    } else if (parsed.tool_name || parsed.toolName) {
+      tools = [{
+        name: parsed.tool_name || parsed.toolName,
+        args: parsed.args || parsed.arguments || {},
+        reason: parsed.reason || ''
+      }];
+    }
+    
+    const normalizedTools = tools
+      .map(tool => {
+        const name = tool?.name || tool?.tool_name || tool?.toolName;
+        if (!name) return null;
+        return {
+          name,
+          args: tool.args || tool.arguments || {},
+          reason: tool.reason || tool.purpose || ''
+        };
+      })
+      .filter(Boolean);
+    
+    if (normalizedTools.length === 0) {
+      return null;
+    }
+    
+    return {
+      needTool: true,
+      tools: normalizedTools,
+      explain: parsed.explain_to_user || parsed.explain || ''
+    };
+  }
+
+  /**
+   * 根据工具规划构建模拟的tool_calls
+   */
+  buildSyntheticToolCalls(plannedTools = []) {
+    return plannedTools.map((tool, index) => ({
+      id: `planner_call_${Date.now()}_${index}`,
+      type: 'function',
+      function: {
+        name: tool.name,
+        arguments: JSON.stringify(tool.args || {})
+      }
+    }));
+  }
+
+  /**
+   * 构建指定工具的Function定义列表
+   */
+  buildFunctionDefinitionsForTools(toolNames = []) {
+    if (!toolNames || toolNames.length === 0) {
+      return [];
+    }
+    const uniqueNames = Array.from(new Set(toolNames));
+    const definitions = [];
+    
+    for (const service of this.mcpServices || []) {
+      if (!service.enabled) continue;
+      const tools = this.mcpToolsCache?.[service.id];
+      if (!tools || tools.length === 0) continue;
+      const matchedTools = tools.filter(tool => uniqueNames.includes(tool.name));
+      if (matchedTools.length === 0) continue;
+      const fnDefs = FunctionCallAdapter.mcpToolsToFunctions(matchedTools, service.id, service.name);
+      definitions.push(...fnDefs);
+    }
+    
+    return definitions;
+  }
+
+  /**
+   * 将工具规划结果转换为可读消息
+   */
+  formatToolPlanningMessage(plan) {
+    if (!plan || !plan.tools || plan.tools.length === 0) {
+      return '';
+    }
+    
+    let message = '🧠 AI 计划激活以下 Skills 以继续分析：\n';
+    plan.tools.forEach((tool, index) => {
+      const argsPreview = Object.entries(tool.args || {})
+        .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
+        .join(', ');
+      message += `${index + 1}. ${tool.name}${argsPreview ? `（参数：${argsPreview}）` : ''}`;
+      if (tool.reason) {
+        message += ` - ${tool.reason}`;
+      }
+      message += '\n';
+    });
+    
+    if (plan.explain) {
+      message += `\n说明：${plan.explain}`;
+    }
+    
+    return message.trim();
   }
   
   /**
@@ -5124,11 +5474,20 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     
     let suggestionSection = '';
     
-    // 优先匹配形如 “=== 建议 === ... ===” 的段落
-    const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
-    const sectionMatch = sectionRegex.exec(normalized);
-    if (sectionMatch && sectionMatch[2]) {
-      suggestionSection = sectionMatch[2].trim();
+    // 新格式：匹配 “【调查建议】 ... （直到下一个【...】或文末）”
+    const bracketRegex = /【调查建议】([\s\S]*?)(?=\n\s*【|$)/i;
+    const bracketMatch = normalized.match(bracketRegex);
+    if (bracketMatch && bracketMatch[1]) {
+      suggestionSection = bracketMatch[1].trim();
+    }
+    
+    // 旧格式：匹配 “=== 建议 === ... ===”
+    if (!suggestionSection) {
+      const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
+      const sectionMatch = sectionRegex.exec(normalized);
+      if (sectionMatch && sectionMatch[2]) {
+        suggestionSection = sectionMatch[2].trim();
+      }
     }
     
     // 退化：直接匹配 “建议:” 关键字

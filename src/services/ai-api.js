@@ -123,11 +123,11 @@ export class AIAPIService {
     let response;
     try {
       response = await fetch(requestUrl, {
-        method: 'POST',
-        headers: requestHeaders,
+      method: 'POST',
+      headers: requestHeaders,
         body: JSON.stringify(requestBody),
         signal: controller.signal
-      });
+    });
     } catch (error) {
       if (handshakeTimerId) {
         clearTimeout(handshakeTimerId);
