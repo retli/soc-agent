@@ -5141,6 +5141,15 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     
     const sectionHeaderRegex = /【\s*[^\n【】]*?(?:进一步)?(?:调查)?建议[^\n【】]*】/i;
     const decorationLineRegex = /^[\s`~\-_=━─—•·◆◇□■○●☆★·▪]+$/u;
+    const isPureHeaderText = (text) => {
+      if (!text) return false;
+      const normalized = text
+        .toLowerCase()
+        .replace(/[\s:：.、\)\（()【】*]/g, '')
+        .replace(/^\d+/, '')
+        .trim();
+      return normalized === '进一步调查建议' || normalized === '调查建议';
+    };
     
     const cleanSuggestionSection = (sectionText) => {
       if (!sectionText) return '';
@@ -5183,7 +5192,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         }
         if (
           sectionHeaderRegex.test(line) ||
-          /(进一步)?调查建议/.test(line) ||
+          isPureHeaderText(line) ||
           decorationLineRegex.test(line) ||
           /^【/.test(line) ||
           /^===/.test(line)
@@ -5324,7 +5333,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     
     const filteredSegments = (list) => list
       .map(seg => seg.trim())
-      .filter(seg => seg.length > 0 && !/(?:进一步)?调查建议/.test(seg.replace(/\s+/g, '')));
+      .filter(seg => seg.length > 0 && !isPureHeaderText(seg));
     
     const numberedSegments = filteredSegments(collectNumberedSegments(suggestionSection));
     if (numberedSegments.length > 0) {
@@ -5340,7 +5349,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return suggestionSection
         .split('\n')
         .map(line => line.trim())
-        .filter(line => line.length > 4 && !/^建议/.test(line) && !/(?:进一步)?调查建议/.test(line));
+        .filter(line => line.length > 4 && !/^建议/.test(line) && !isPureHeaderText(line));
     }
     
     return filteredSegments(segments);
