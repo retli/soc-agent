@@ -463,6 +463,9 @@ class AIChat {
     if (!ownerEmails.length) return;
     const conversation = this.getCurrentConversation();
     if (!conversation) return;
+    this.ensureConversationMetadata(conversation);
+    const existing = new Set((conversation.metadata.ownerEmails || []).map(email => email.toLowerCase()));
+    let updated = false;
     ownerEmails.forEach(email => {
       const lower = email.toLowerCase();
       if (!existing.has(lower)) {

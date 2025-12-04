@@ -21,6 +21,25 @@ export class TextFormatter {
   }
 
   /**
+   * Convert raw text/markdown/ReAct内容为可直接渲染的HTML
+   */
+  static format(text, previousHtml = null) {
+    if (text === undefined || text === null) {
+      return '';
+    }
+    const source = typeof text === 'string' ? text : String(text);
+    try {
+      const html = this.markdownToHtml(source, previousHtml);
+      if (html && html.length > 0) {
+        return html;
+      }
+    } catch (err) {
+      // ignore and fallback
+    }
+    return this.escapeHtml(source).replace(/\n/g, '<br>');
+  }
+
+  /**
    * Format timestamp to relative time
    */
   static formatTime(isoString) {
