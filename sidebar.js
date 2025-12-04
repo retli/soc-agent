@@ -5131,29 +5131,16 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
 
   parseTheHiveSuggestions(commentsText) {
     if (!commentsText) return [];
-    const normalized = commentsText.replace(/\r/g, '').trim();
+    const normalized = commentsText
+      .replace(/\r/g, '')
+      .replace(/\u00A0/g, ' ')
+      .replace(/\u200B/g, '')
+      .trim();
+    
     if (!normalized) return [];
     
-    const extractSuggestionSection = () => {
-      const bracketRegex = /【\s*[^\n【】]*?(?:调查)?建议[^\n【】]*】([\s\S]*?)(?=(?:\n\s*【)|(?:\n\s*===)|\Z)/i;
-      const bracketMatch = bracketRegex.exec(normalized);
-      if (bracketMatch && bracketMatch[1]) {
-        return bracketMatch[1].trim();
-      }
-      
-      const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
-      const sectionMatch = sectionRegex.exec(normalized);
-      if (sectionMatch && sectionMatch[2]) {
-        return sectionMatch[2].trim();
-      }
-      
-      const keywordMatch = normalized.match(/(?:调查)?建议[：:]\s*([\s\S]+)/i);
-      if (keywordMatch && keywordMatch[1]) {
-        return keywordMatch[1].trim();
-      }
-      
-      return '';
-    };
+    const sectionHeaderRegex = /【\s*[^\n【】]*?(?:进一步)?(?:调查)?建议[^\n【】]*】/i;
+    const decorationLineRegex = /^[\s`~\-_=━─—•·◆◇□■○●☆★·▪]+$/u;
     
     const cleanSuggestionSection = (sectionText) => {
       if (!sectionText) return '';
@@ -5169,7 +5156,84 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         section = section.substring(0, delimiterMatch).trim();
       }
       
+      section = section
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !decorationLineRegex.test(line))
+        .join('\n');
+      
       return section.trim();
+    };
+    
+    const extractSectionByLineSweep = () => {
+      const lines = normalized.split('\n');
+      const captured = [];
+      let collecting = false;
+      let blankCount = 0;
+      
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        const plain = trimmed.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+        
+        if (!collecting) {
+          if (sectionHeaderRegex.test(plain) || /进一步调查建议/i.test(plain)) {
+            collecting = true;
+            const inline = plain.replace(sectionHeaderRegex, '').trim();
+            if (inline) {
+              captured.push(inline);
+            }
+            continue;
+          }
+          continue;
+        }
+        
+        if (!trimmed) {
+          if (captured.length === 0) continue;
+          blankCount += 1;
+          if (blankCount >= 2) break;
+          continue;
+        }
+        
+        blankCount = 0;
+        
+        if (
+          sectionHeaderRegex.test(plain) ||
+          /^【/.test(plain) ||
+          /^===/.test(plain) ||
+          /^---/.test(plain)
+        ) {
+          break;
+        }
+        
+        if (decorationLineRegex.test(plain)) {
+          continue;
+        }
+        
+        captured.push(trimmed);
+      }
+      
+      return captured.join('\n').trim();
+    };
+    
+    const extractSectionByRegex = () => {
+      const bracketRegex = /【\s*[^\n【】]*?(?:调查)?建议[^\n【】]*】([\s\S]*?)(?=(?:\n\s*【)|(?:\n\s*===)|(?:\n\s*---)|(?:\n\s*━+)|\Z)/i;
+      const bracketMatch = bracketRegex.exec(normalized);
+      if (bracketMatch && bracketMatch[1]) {
+        return bracketMatch[1].trim();
+      }
+      
+      const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
+      const sectionMatch = sectionRegex.exec(normalized);
+      if (sectionMatch && sectionMatch[2]) {
+        return sectionMatch[2].trim();
+      }
+      
+      const keywordMatch = normalized.match(/(?:进一步)?(?:调查)?建议[：:]\s*([\s\S]+)/i);
+      if (keywordMatch && keywordMatch[1]) {
+        return keywordMatch[1].trim();
+      }
+      
+      return '';
     };
     
     const collectNumberedSegments = (sectionText) => {
@@ -5191,7 +5255,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       };
       
       lines.forEach(rawLine => {
-        const line = rawLine.trimEnd();
+        const line = rawLine.replace(/^\s*[•·▪*-]+\s*/, '').trimEnd();
         const numberMatch = line.match(/^\s*(\d+)\s*[\.、\)\）]\s*(.*)$/);
         if (numberMatch) {
           pushCurrent();
@@ -5209,10 +5273,17 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return segments;
     };
     
-    let suggestionSection = cleanSuggestionSection(extractSuggestionSection());
+    let suggestionSection = cleanSuggestionSection(extractSectionByLineSweep());
+    if (!suggestionSection) {
+      suggestionSection = cleanSuggestionSection(extractSectionByRegex());
+    }
+    
     if (!suggestionSection || /^暂无/i.test(suggestionSection)) {
       return [];
     }
+    
+    // 移除尾部的装饰线，防止被当成内容
+    suggestionSection = suggestionSection.replace(/\n\s*━+\s*$/g, '').trim();
     
     const numberedSegments = collectNumberedSegments(suggestionSection);
     if (numberedSegments.length > 0) {
