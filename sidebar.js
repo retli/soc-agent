@@ -5131,275 +5131,53 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
 
   parseTheHiveSuggestions(commentsText) {
     if (!commentsText) return [];
+    
     const normalized = commentsText
       .replace(/\r/g, '')
       .replace(/\u00A0/g, ' ')
       .replace(/\u200B/g, '')
+      .replace(/\\n/g, '\n')
       .trim();
     
     if (!normalized) return [];
     
-    const sectionHeaderRegex = /【\s*[^\n【】]*?(?:进一步)?(?:调查)?建议[^\n【】]*】/i;
-    const decorationLineRegex = /^[\s`~\-_=━─—•·◆◇□■○●☆★·▪]+$/u;
-    const isPureHeaderText = (text) => {
-      if (!text) return false;
-      const normalized = text
-        .toLowerCase()
-        .replace(/[\s:：.、\)\（()【】*]/g, '')
-        .replace(/^\d+/, '')
-        .trim();
-      return normalized === '进一步调查建议' || normalized === '调查建议';
-    };
-    
-    const cleanSuggestionSection = (sectionText) => {
-      if (!sectionText) return '';
-      let section = sectionText;
-      
-      const stopIndex = section.indexOf('===');
-      if (stopIndex > -1) {
-        section = section.substring(0, stopIndex).trim();
-      }
-      
-      const delimiterMatch = section.search(/\n-{3,}\s*/);
-      if (delimiterMatch > -1) {
-        section = section.substring(0, delimiterMatch).trim();
-      }
-      
-      section = section
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line && !decorationLineRegex.test(line))
-        .join('\n');
-      
-      return section.trim();
-    };
-    
-    const stripLeadingHeaders = (sectionText) => {
-      if (!sectionText) return '';
-      const lines = sectionText.split('\n');
-      const numberedRegex = /^\s*\d+\s*[\.、\)\）]/;
-      while (lines.length > 0) {
-        const line = lines[0].trim();
-        if (!line) {
-          lines.shift();
-          continue;
-        }
-        if (
-          numberedRegex.test(line) ||
-          /^\s*[（(]?\d+/.test(line)
-        ) {
-          break;
-        }
-        if (
-          sectionHeaderRegex.test(line) ||
-          isPureHeaderText(line) ||
-          decorationLineRegex.test(line) ||
-          /^【/.test(line) ||
-          /^===/.test(line)
-        ) {
-          lines.shift();
-          continue;
-        }
-        // 非装饰但也不是编号，若不包含中文建议关键词则保留
-        if (!/(建议|排查|处置)/.test(line)) {
-          lines.shift();
-          continue;
-        }
-        break;
-      }
-      return lines.join('\n').trim();
-    };
-    
-    const extractSectionFromMarker = () => {
-      const markerRegex = /【\s*[^\n【】]*?(?:调查)?建议[^\n【】]*】/i;
-      const markerMatch = normalized.match(markerRegex);
-      if (!markerMatch) return '';
-      const startIndex = markerMatch.index + markerMatch[0].length;
-      const rest = normalized.substring(startIndex);
-      const lines = rest.split('\n');
-      const captured = [];
-      let blankCount = 0;
-      
-      for (const rawLine of lines) {
-        const trimmed = rawLine.trim();
-        if (!trimmed) {
-          if (captured.length === 0) continue;
-          blankCount += 1;
-          if (blankCount >= 2) break;
-          continue;
-        }
-        blankCount = 0;
-        
-        if (
-          sectionHeaderRegex.test(trimmed) ||
-          isPureHeaderText(trimmed) ||
-          /^【/.test(trimmed) ||
-          /^===/.test(trimmed) ||
-          /^---/.test(trimmed)
-        ) {
-          break;
-        }
-        
-        if (decorationLineRegex.test(trimmed)) {
-          continue;
-        }
-        
-        captured.push(trimmed);
-      }
-      
-      return captured.join('\n').trim();
-    };
-    
-    const extractSectionByLineSweep = () => {
-      const lines = normalized.split('\n');
-      const captured = [];
-      let collecting = false;
-      let blankCount = 0;
-      
-      for (const rawLine of lines) {
-        const trimmed = rawLine.trim();
-        const plain = trimmed.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
-        
-        if (!collecting) {
-          if (sectionHeaderRegex.test(plain) || /进一步调查建议/i.test(plain)) {
-            collecting = true;
-            const inline = plain.replace(sectionHeaderRegex, '').trim();
-            if (inline) {
-              captured.push(inline);
-            }
-            continue;
-          }
-          continue;
-        }
-        
-        if (!trimmed) {
-          if (captured.length === 0) continue;
-          blankCount += 1;
-          if (blankCount >= 2) break;
-          continue;
-        }
-        
-        blankCount = 0;
-        
-        if (
-          sectionHeaderRegex.test(plain) ||
-          /^【/.test(plain) ||
-          /^===/.test(plain) ||
-          /^---/.test(plain)
-        ) {
-          break;
-        }
-        
-        if (decorationLineRegex.test(plain)) {
-          continue;
-        }
-        
-        captured.push(trimmed);
-      }
-      
-      return captured.join('\n').trim();
-    };
-    
-    const extractSectionByRegex = () => {
-      const bracketRegex = /【\s*[^\n【】]*?(?:调查)?建议[^\n【】]*】([\s\S]*?)(?=(?:\n\s*【)|(?:\n\s*===)|(?:\n\s*---)|(?:\n\s*━+)|\Z)/i;
-      const bracketMatch = bracketRegex.exec(normalized);
-      if (bracketMatch && bracketMatch[1]) {
-        return bracketMatch[1].trim();
-      }
-      
-      const sectionRegex = /===\s*([^\n=]*?建议[^\n=]*)===([\s\S]*?)(?=^===|\Z)/gmi;
-      const sectionMatch = sectionRegex.exec(normalized);
-      if (sectionMatch && sectionMatch[2]) {
-        return sectionMatch[2].trim();
-      }
-      
-      const keywordMatch = normalized.match(/(?:进一步)?(?:调查)?建议[：:]\s*([\s\S]+)/i);
-      if (keywordMatch && keywordMatch[1]) {
-        return keywordMatch[1].trim();
-      }
-      
-      return '';
-    };
-    
-    const collectNumberedSegments = (sectionText) => {
-      const lines = sectionText.split('\n');
-      const segments = [];
-      let current = null;
-      
-      const pushCurrent = () => {
-        if (!current) return;
-        const formatted = current
-          .split('\n')
-          .map(line => line.trim())
-          .filter(Boolean)
-          .join(' ');
-        if (formatted.length > 0) {
-          segments.push(formatted);
-        }
-        current = null;
-      };
-      
-      lines.forEach(rawLine => {
-        const line = rawLine.replace(/^\s*[•·▪*-]+\s*/, '').trimEnd();
-        const numberMatch = line.match(/^\s*(\d+)\s*[\.、\)\）]\s*(.*)$/);
-        if (numberMatch) {
-          pushCurrent();
-          const [, , rest = ''] = numberMatch;
-          current = rest.trim();
-          return;
-        }
-        
-        if (current !== null) {
-          current += (current.length > 0 ? '\n' : '') + line.trim();
-        }
-      });
-      
-      pushCurrent();
-      return segments;
-    };
-    
-    let suggestionSection = cleanSuggestionSection(extractSectionByLineSweep());
-    if (!suggestionSection) {
-      suggestionSection = cleanSuggestionSection(extractSectionByRegex());
-    }
-    if (!suggestionSection) {
-      suggestionSection = cleanSuggestionSection(extractSectionFromMarker());
-    }
-    
-    if (!suggestionSection || /^暂无/i.test(suggestionSection)) {
+    const anchor = '【调查建议】';
+    const anchorIndex = normalized.indexOf(anchor);
+    if (anchorIndex === -1) {
       return [];
     }
     
-    // 移除尾部的装饰线，防止被当成内容
-    suggestionSection = suggestionSection.replace(/\n\s*━+\s*$/g, '').trim();
-    suggestionSection = stripLeadingHeaders(suggestionSection);
+    const afterAnchor = normalized.slice(anchorIndex + anchor.length);
+    const lines = afterAnchor.split('\n').map(line => line.trim());
+    const suggestions = [];
     
-    const filteredSegments = (list) => list
-      .map(seg => seg.trim())
-      .filter(seg => seg.length > 0 && !isPureHeaderText(seg));
-    
-    const numberedSegments = filteredSegments(collectNumberedSegments(suggestionSection));
-    if (numberedSegments.length > 0) {
-      return numberedSegments;
+    for (const line of lines) {
+      if (!line) {
+        if (suggestions.length > 0) break;
+        continue;
+      }
+      
+      if (/^[【=━\-]/.test(line)) break;
+      
+      const match = line.match(/^\s*(\d+)\s*[\.、\)\）]\s*(.+)$/);
+      if (match && match[2]) {
+        const text = match[2].trim();
+        if (text && !/^暂无/i.test(text)) {
+          suggestions.push(text);
+        }
+        continue;
+      }
+      
+      if (/^暂无/i.test(line)) {
+        continue;
+      }
+      
+      if (suggestions.length > 0) {
+        suggestions[suggestions.length - 1] += ' ' + line;
+      }
     }
     
-    const segments = suggestionSection
-      .split(/(?=\n?\s*\d+\s*[\.、\)\）])/)
-      .map(seg => seg.replace(/^\s*\d+\s*[\.、\)\）]/, '').trim())
-      .filter(Boolean);
-    
-    let finalSegments = filteredSegments(segments);
-    
-    if (finalSegments.length === 0) {
-      finalSegments = filteredSegments(
-        suggestionSection
-          .split('\n')
-          .map(line => line.trim())
-          .filter(line => line.length > 4 && !/^建议/.test(line))
-      );
-    }
-    
-    return finalSegments;
+    return suggestions;
   }
 
   getDefaultSecurityPrompts() {
