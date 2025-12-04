@@ -5165,6 +5165,42 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return section.trim();
     };
     
+    const stripLeadingHeaders = (sectionText) => {
+      if (!sectionText) return '';
+      const lines = sectionText.split('\n');
+      const numberedRegex = /^\s*\d+\s*[\.、\)\）]/;
+      while (lines.length > 0) {
+        const line = lines[0].trim();
+        if (!line) {
+          lines.shift();
+          continue;
+        }
+        if (
+          numberedRegex.test(line) ||
+          /^\s*[（(]?\d+/.test(line)
+        ) {
+          break;
+        }
+        if (
+          sectionHeaderRegex.test(line) ||
+          /(进一步)?调查建议/.test(line) ||
+          decorationLineRegex.test(line) ||
+          /^【/.test(line) ||
+          /^===/.test(line)
+        ) {
+          lines.shift();
+          continue;
+        }
+        // 非装饰但也不是编号，若不包含中文建议关键词则保留
+        if (!/(建议|排查|处置)/.test(line)) {
+          lines.shift();
+          continue;
+        }
+        break;
+      }
+      return lines.join('\n').trim();
+    };
+    
     const extractSectionByLineSweep = () => {
       const lines = normalized.split('\n');
       const captured = [];
@@ -5284,8 +5320,13 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     
     // 移除尾部的装饰线，防止被当成内容
     suggestionSection = suggestionSection.replace(/\n\s*━+\s*$/g, '').trim();
+    suggestionSection = stripLeadingHeaders(suggestionSection);
     
-    const numberedSegments = collectNumberedSegments(suggestionSection);
+    const filteredSegments = (list) => list
+      .map(seg => seg.trim())
+      .filter(seg => seg.length > 0 && !/(?:进一步)?调查建议/.test(seg.replace(/\s+/g, '')));
+    
+    const numberedSegments = filteredSegments(collectNumberedSegments(suggestionSection));
     if (numberedSegments.length > 0) {
       return numberedSegments;
     }
@@ -5299,10 +5340,10 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return suggestionSection
         .split('\n')
         .map(line => line.trim())
-        .filter(line => line.length > 4 && !/^建议/.test(line));
+        .filter(line => line.length > 4 && !/^建议/.test(line) && !/(?:进一步)?调查建议/.test(line));
     }
     
-    return segments;
+    return filteredSegments(segments);
   }
 
   getDefaultSecurityPrompts() {
