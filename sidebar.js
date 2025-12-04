@@ -48,6 +48,10 @@ import { MESSAGE_ROLES, TIMEOUTS, UI_ELEMENTS } from './src/config/constants.js'
 import { DEFAULT_CONFIG } from './src/config/defaults.js';
 import { TheHiveIntegration } from './src/services/thehive-integration.js';
 import { URLMatcher } from './src/utils/url-matcher.js';
+import { SuggestedActionsManager } from './src/ui/suggested-actions-manager.js';
+import { ConversationManager } from './src/core/conversation-manager.js';
+import { ReActManager } from './src/core/react-manager.js';
+import { MessageRenderer } from './src/ui/message-renderer.js';
 
 const DEFAULT_SECURITY_PROMPTS = [
   '如何隔离受感染主机并保留取证证据？',
@@ -68,13 +72,10 @@ class AIChat {
     this.aiService = null;
     this.pendingManualTools = {};  // 待执行的手动工具 { batchId: { tools: [], results: [], originalQuery: '' } }
     this.thehiveIntegration = null;  // TheHive 集成实例
-    this.toolResultsCache = {};  // 🔧 工具结果缓存 { conversationId: [{ toolName, result, error, args, serviceName, timestamp, toolCallId }] }
-    this.reActState = {
-      active: false,
-      iteration: 0,
-      lastContent: '',
-      noticeShown: false
-    };
+    this.suggestedActionsManager = null; // 建议行动管理器
+    this.conversationManager = new ConversationManager(); // 会话管理器
+    this.reActManager = new ReActManager(); // ReAct 状态管理器
+    this.messageRenderer = new MessageRenderer(); // 消息渲染器
     
     this.init();
   }
@@ -88,8 +89,18 @@ class AIChat {
       await this.loadDevMode();
       await this.loadConversations();
       
+      // Initialize Suggested Actions Manager
+      this.suggestedActionsManager = new SuggestedActionsManager(
+        this.config, 
+        (suggestion) => {
+          if (this.config.autoSendSuggestions) {
+            setTimeout(() => { this.handleSend(); }, 100);
+          }
+        }
+      );
+      
       // 🔧 修复：初始化时重置建议行动面板为初始状态
-      this.resetSuggestedActions();
+      this.suggestedActionsManager.reset();
       
       // Apply UI configuration
       this.applyUIConfig();
@@ -246,23 +257,13 @@ class AIChat {
   }
   
   async loadConversations() {
-    this.conversations = await StorageManager.getConversations();
-    this.conversations.forEach(conv => {
-      if (!conv.metadata || typeof conv.metadata !== 'object') {
-        conv.metadata = {};
-      }
-    });
-    logger.info('[Init] Loaded conversations:', this.conversations.length);
-    this.conversations.forEach((conv, idx) => {
-      logger.debug(`[Init] Conversation ${idx}: ID=${conv.id}, Messages=${conv.messages.length}, Title=${conv.title}`);
-    });
+    await this.conversationManager.load();
+    this.conversations = this.conversationManager.getAll();
   }
   
   async saveConversations() {
-    const success = await StorageManager.saveConversations(this.conversations);
-    if (!success) {
-      this.showReloadNotice();
-    }
+    await this.conversationManager.save();
+    this.conversations = this.conversationManager.getAll();
   }
   
   showReloadNotice() {
@@ -394,67 +395,38 @@ class AIChat {
   }
   
   async createNewConversation() {
-    const conversation = {
-      id: 'conv-' + Date.now(),
-      title: '新对话',
-      messages: [],
-      conversationId: null,
-      createdAt: new Date().toISOString(),
-      metadata: {}
-    };
-    
-    this.conversations.unshift(conversation);
-    this.saveConversations();
-    
-    // 🔧 初始化工具结果缓存
-    this.toolResultsCache[conversation.id] = [];
-    logger.info('[Cache] Initialized tool results cache for conversation:', conversation.id);
+    const conversation = await this.conversationManager.create();
+    this.conversations = this.conversationManager.getAll();
     
     this.switchConversation(conversation.id);
     this.renderConversationList();
     
     // 🔧 修复：重置建议行动面板为初始状态
-    this.resetSuggestedActions();
+    this.suggestedActionsManager.reset();
     
     logger.info('[MCP] New conversation created, refreshing tools');
     await this.refreshMCPTools();
   }
   
   switchConversation(conversationId) {
+    const conversation = this.conversationManager.switch(conversationId);
     this.currentConversationId = conversationId;
-    const conversation = this.getCurrentConversation();
-    logger.info('[Switch] Switching to conversation:', conversationId);
-    if (conversation) {
-      logger.info('[Switch] Conversation has', conversation.messages.length, 'messages');
-    } else {
-      logger.warn('[Switch] Conversation not found:', conversationId);
-    }
-    
-    // 🔧 确保工具结果缓存存在（如果不存在则初始化）
-    if (!this.toolResultsCache[conversationId]) {
-      this.toolResultsCache[conversationId] = [];
-      logger.info('[Cache] Initialized tool results cache for switched conversation:', conversationId);
-    } else {
-      logger.info('[Cache] Cache exists for conversation:', conversationId, 'with', this.toolResultsCache[conversationId].length, 'results');
-    }
+    this.conversations = this.conversationManager.getAll();
     
     this.renderMessages();
     this.renderConversationList();
     this.closeHistoryDropdown();
     
     // 🔧 修复：切换对话时重置建议行动面板为初始状态
-    this.resetSuggestedActions();
+    this.suggestedActionsManager.reset();
   }
   
   getCurrentConversation() {
-    return this.conversations.find(c => c.id === this.currentConversationId);
+    return this.conversationManager.getCurrent();
   }
 
   ensureConversationMetadata(conversation) {
-    if (!conversation) return;
-    if (!conversation.metadata || typeof conversation.metadata !== 'object') {
-      conversation.metadata = {};
-    }
+    // Handled by ConversationManager
   }
 
   getConversationOwnerEmails(conversation) {
@@ -491,9 +463,6 @@ class AIChat {
     if (!ownerEmails.length) return;
     const conversation = this.getCurrentConversation();
     if (!conversation) return;
-    this.ensureConversationMetadata(conversation);
-    const existing = new Set((conversation.metadata.ownerEmails || []).map(email => email.toLowerCase()));
-    let updated = false;
     ownerEmails.forEach(email => {
       const lower = email.toLowerCase();
       if (!existing.has(lower)) {
@@ -545,98 +514,51 @@ class AIChat {
   }
   
   renderMessages() {
-    const messagesEl = document.getElementById('messages');
     const conversation = this.getCurrentConversation();
-    
     if (!conversation) return;
     
     logger.debug('[Render] Rendering messages for conversation:', conversation.id);
-    logger.debug('[Render] Message count:', conversation.messages.length);
-    
-    messagesEl.innerHTML = '';
-    
-    if (conversation.messages.length === 0) {
-      messagesEl.innerHTML = `
-        <div class="message assistant">
-          <div class="message-content">你好！我是 AI 助手，有什么可以帮你的吗？</div>
-        </div>
-      `;
-      return;
-    }
-    
-    conversation.messages.forEach(msg => {
-      if (msg.role === MESSAGE_ROLES.TOOL) {
-        this.renderToolCallRecord(msg);
-      } else {
-        this.appendMessage(msg.role, msg.content, false);
-      }
-    });
-    
-    this.scrollToBottom();
+    this.messageRenderer.renderMessages(conversation.messages);
   }
   
   appendMessage(role, content, shouldSave = true) {
-    const messagesEl = document.getElementById('messages');
-    
     let displayContent = content;
     if (role === MESSAGE_ROLES.ASSISTANT) {
       displayContent = TextFormatter.removeToolMarkers(content);
-      
       if (!displayContent) {
         if (shouldSave) {
-          const conversation = this.getCurrentConversation();
-          if (conversation) {
-            conversation.messages.push({ role, content, timestamp: new Date().toISOString() });
-            this.saveConversations();
-          }
+           this.conversationManager.addMessage(this.currentConversationId, role, content);
         }
         return;
       }
     }
-    
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${role}`;
-    
-    // For assistant messages, render Markdown; for user messages, escape HTML
-    const formattedContent = role === MESSAGE_ROLES.ASSISTANT 
-      ? TextFormatter.markdownToHtml(displayContent)
-      : TextFormatter.escapeHtml(displayContent);
-    
-    // 为用户消息添加编辑按钮
-    const editButton = role === MESSAGE_ROLES.USER 
-      ? `<button class="message-edit-btn" title="编辑并重新发送">✏️</button>`
-      : '';
-    
-    messageDiv.innerHTML = `
-      <div class="message-content">${formattedContent}</div>
-      ${editButton}
-    `;
+
+    // 使用 MessageRenderer 渲染
+    const messageEl = this.messageRenderer.renderMessage(role, displayContent, Date.now());
     
     // 为用户消息添加编辑功能
     if (role === MESSAGE_ROLES.USER) {
-      const editBtn = messageDiv.querySelector('.message-edit-btn');
-      editBtn.addEventListener('click', () => {
-        this.handleEditMessage(messageDiv, content);
-      });
+      const editBtn = messageEl.querySelector('.message-edit-btn');
+      if (editBtn) {
+        editBtn.addEventListener('click', () => {
+          this.handleEditMessage(messageEl, content);
+        });
+      }
     }
     
-    messagesEl.appendChild(messageDiv);
-    this.scrollToBottom();
+    this.messageRenderer.append(messageEl);
     
     if (shouldSave) {
-      const conversation = this.getCurrentConversation();
-      if (conversation) {
-        conversation.messages.push({ role, content, timestamp: new Date().toISOString() });
-        
-        if (conversation.messages.length === 1 && role === MESSAGE_ROLES.USER) {
-          conversation.title = TextFormatter.truncate(content);
-          this.renderConversationList();
+      this.conversationManager.addMessage(this.currentConversationId, role, content);
+      this.conversationManager.getCurrent().messages.forEach((msg, index) => {
+        // 检查是否是第一条用户消息，更新标题
+        if (index === 0 && role === MESSAGE_ROLES.USER) {
+            this.renderConversationList();
         }
-        
-        this.saveConversations();
-        if (role === MESSAGE_ROLES.USER || role === MESSAGE_ROLES.ASSISTANT) {
-          this.detectAndStoreOwnerEmails(content);
-        }
+      });
+      
+      if (role === MESSAGE_ROLES.USER || role === MESSAGE_ROLES.ASSISTANT) {
+        this.detectAndStoreOwnerEmails(content);
       }
     }
   }
@@ -645,146 +567,56 @@ class AIChat {
     logger.debug('[Render] Rendering tool call record:', toolMsg);
     logger.debug('[Render] Tool result data:', toolMsg.result || toolMsg.content);
     
-    const messagesEl = document.getElementById('messages');
-    const recordDiv = document.createElement('div');
-    const recordId = `tool-record-${toolMsg.timestamp || Date.now()}`;
-    recordDiv.className = 'tool-call-record';
-    recordDiv.id = recordId;
+    const recordHtml = this.messageRenderer.renderToolRecordHTML(toolMsg);
     
-    // 直接在外层div上应用样式
-    recordDiv.style.cssText = 'margin: 8px 0; animation: slideIn 0.3s ease-out;';
+    // Create a temporary container to parse the HTML string into DOM elements
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = recordHtml.trim();
+    const recordDiv = tempDiv.firstChild;
     
-    logger.debug('[Render] Creating tool record with ID:', recordId);
-    
-    // 格式化参数显示 - 使用键值对形式而非JSON
-    let argsHtml = '';
-    if (Object.keys(toolMsg.args).length > 0) {
-      argsHtml = '<div style="display: flex; flex-direction: column; gap: 6px;">';
-      for (const [key, value] of Object.entries(toolMsg.args)) {
-        const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
-        argsHtml += `
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <label style="font-size: 10px !important; font-weight: 600 !important; color: rgba(255, 255, 255, 0.9) !important; min-width: 80px; flex-shrink: 0;">${TextFormatter.escapeHtml(key)}:</label>
-            <span style="font-family: 'Courier New', monospace; font-size: 10px !important; background: rgba(255, 255, 255, 0.95) !important; border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 4px; padding: 4px 8px; color: #1f2937 !important; flex: 1; word-break: break-all;">${TextFormatter.escapeHtml(valueStr)}</span>
-          </div>
-        `;
-      }
-      argsHtml += '</div>';
-    } else {
-      argsHtml = '<div style="font-size: 10px !important; color: rgba(255, 255, 255, 0.6) !important; font-style: italic; padding: 4px 0;">无参数</div>';
-    }
-    
-    // 向后兼容：优先使用 result，如果不存在则使用 content（旧记录）
-    const resultData = toolMsg.result || toolMsg.content;
-    const resultPreview = resultData 
-      ? (typeof resultData === 'string' ? resultData : JSON.stringify(resultData, null, 2))
-      : '(无执行结果)';
-    
-    // 获取服务名称（如果存在）
-    const serviceName = toolMsg.serviceName || '默认服务';
-    
-    // 使用与 appendToolExecutionPrompt 相同的紫色渐变样式，添加折叠按钮
-    recordDiv.innerHTML = `
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important; border-radius: 8px !important; padding: 8px 10px !important; color: white !important; box-shadow: 0 2px 6px rgba(102, 126, 234, 0.2) !important;">
-        <div style="display: flex !important; align-items: center !important; justify-content: space-between; margin-bottom: 6px !important;">
-          <div style="display: flex !important; align-items: center !important; gap: 6px; flex: 1;">
-            <span style="font-size: 14px !important;">🔧</span>
-            <span style="font-size: 11px !important; font-weight: 500 !important; letter-spacing: 0.2px;"> 
-              <strong style="font-family: 'Courier New', monospace !important; background: rgba(255, 255, 255, 0.2) !important; padding: 1px 4px !important; border-radius: 3px !important; font-weight: 600 !important; font-size: 10px !important; margin-left: 2px;">
-                ${TextFormatter.escapeHtml(toolMsg.toolName)}
-              </strong>
-            </span>
-            <span style="font-size: 9px !important; color: rgba(255, 255, 255, 0.8) !important; background: rgba(255, 255, 255, 0.15) !important; padding: 1px 5px !important; border-radius: 10px !important; margin-left: 6px; font-weight: 500 !important; letter-spacing: 0.2px;">
-              [${TextFormatter.escapeHtml(serviceName)}]
-            </span>
-          </div>
-          <button class="tool-record-toggle" style="background: rgba(255, 255, 255, 0.15) !important; border: none !important; color: white !important; cursor: pointer !important; padding: 2px 6px !important; border-radius: 4px !important; font-size: 10px !important; transition: all 0.2s ease; flex-shrink: 0;">
-            <span style="display: inline-block; transition: transform 0.2s ease;">▼</span>
-          </button>
-        </div>
-        <div class="tool-record-details" style="max-height: 0; overflow: hidden; opacity: 0; transition: max-height 0.3s ease, opacity 0.2s ease, margin 0.3s ease; margin: 0;">
-          <div style="margin-top: 6px;">
-            <div style="font-size: 9px !important; font-weight: 600 !important; color: rgba(255, 255, 255, 0.8) !important; text-transform: uppercase !important; letter-spacing: 0.5px; margin-bottom: 6px !important;">执行参数</div>
-            <div style="padding: 0 0 8px 0;">
-              ${argsHtml}
-            </div>
-          </div>
-          <div>
-            <div style="font-size: 9px !important; font-weight: 600 !important; color: rgba(255, 255, 255, 0.8) !important; text-transform: uppercase !important; letter-spacing: 0.5px; margin-bottom: 6px !important;">执行结果</div>
-            <div style="background: rgba(255, 255, 255, 0.95) !important; border-radius: 5px !important; overflow: hidden !important; border: 1px solid rgba(255, 255, 255, 0.3) !important; border-left: 3px solid #10b981 !important;">
-              <div style="padding: 4px 8px !important; font-weight: 600 !important; font-size: 9px !important; display: flex !important; align-items: center !important; gap: 4px; background-color: #d1fae5 !important; color: #065f46 !important;">✓ 执行成功</div>
-              <pre style="color: #1f2937 !important; padding: 8px !important; margin: 0 !important; font-family: 'Courier New', monospace !important; font-size: 10px !important; line-height: 1.6 !important; white-space: pre-wrap !important; word-break: break-word !important; max-height: 300px !important; overflow-y: auto !important; background: #f9fafb !important; border-top: 1px solid rgba(0,0,0,0.05) !important;">${TextFormatter.escapeHtml(resultPreview)}</pre>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-    
-    messagesEl.appendChild(recordDiv);
-    
-    // 添加折叠/展开功能
+    // Bind toggle event
     const toggleBtn = recordDiv.querySelector('.tool-record-toggle');
     const detailsDiv = recordDiv.querySelector('.tool-record-details');
     const toggleArrow = toggleBtn.querySelector('span');
     
-    toggleBtn.addEventListener('click', () => {
-      const isExpanded = detailsDiv.style.maxHeight && detailsDiv.style.maxHeight !== '0px';
-      
-      if (isExpanded) {
-        // Collapse
-        detailsDiv.style.maxHeight = '0';
-        detailsDiv.style.opacity = '0';
-        detailsDiv.style.margin = '0';
-        toggleArrow.style.transform = 'rotate(0deg)';
-      } else {
-        // Expand
-        detailsDiv.style.maxHeight = '800px';
-        detailsDiv.style.opacity = '1';
-        detailsDiv.style.marginTop = '6px';
-        toggleArrow.style.transform = 'rotate(-180deg)';
-      }
-    });
+    if (toggleBtn && detailsDiv) {
+      toggleBtn.addEventListener('click', () => {
+        const isExpanded = detailsDiv.style.maxHeight !== '0px' && detailsDiv.style.maxHeight !== '0';
+        
+        if (isExpanded) {
+          // Collapse
+          detailsDiv.style.maxHeight = '0';
+          detailsDiv.style.opacity = '0';
+          detailsDiv.style.margin = '0';
+          toggleArrow.style.transform = 'rotate(0deg)';
+        } else {
+          // Expand
+          detailsDiv.style.maxHeight = '500px'; // Set a reasonable max height
+          detailsDiv.style.opacity = '1';
+          detailsDiv.style.marginTop = '8px';
+          toggleArrow.style.transform = 'rotate(180deg)';
+        }
+      });
+    }
+    
+    this.messageRenderer.append(recordDiv);
   }
   
   appendToolExecutionPrompt(toolIntent, originalQuery, batchId = null, serviceId = null) {
-    const messagesEl = document.getElementById('messages');
-    const promptDiv = document.createElement('div');
-    promptDiv.className = 'tool-execution-prompt';
-    
     const { toolName, args } = toolIntent;
     const promptId = `tool-prompt-${Date.now()}`;
-    promptDiv.id = promptId;
     
-    // 保存批次ID和服务ID到元素属性
-    if (batchId) {
-      promptDiv.setAttribute('data-batch-id', batchId);
-    }
-    if (serviceId) {
-      promptDiv.setAttribute('data-service-id', serviceId);
-    }
-    promptDiv.setAttribute('data-original-query', originalQuery || '');
-    promptDiv.setAttribute('data-tool-name', toolName || '');
-    
-    // 根据工具名查找对应的MCP服务
     let serviceName = '默认服务';
     if (this.mcpServices && this.mcpServices.length > 0) {
-      // 从缓存中查找拥有该工具的服务
       let targetService = null;
       for (const service of this.mcpServices) {
         if (!service.enabled) continue;
-        
-        if (this.mcpToolsCache[service.id]) {
-          const tools = this.mcpToolsCache[service.id];
-          const hasTool = tools.some(t => t.name === toolName);
-          
-          if (hasTool) {
-            targetService = service;
-            break;
-          }
+        const tools = this.mcpToolsCache[service.id];
+        if (tools && tools.some(t => t.name === toolName)) {
+          targetService = service;
+          break;
         }
       }
-      
-      // 如果找到了对应的服务，使用它；否则使用第一个启用的服务
       if (targetService) {
         serviceName = targetService.name;
       } else {
@@ -795,62 +627,23 @@ class AIChat {
       }
     }
     
-    let argsInputsHtml = '';
-    if (Object.keys(args).length > 0) {
-      argsInputsHtml = '<div style="display: flex; flex-direction: column; gap: 6px;">';
-      for (const [key, value] of Object.entries(args)) {
-        const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
-        argsInputsHtml += `
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <label style="font-size: 10px; font-weight: 600; color: rgba(255, 255, 255, 0.9); min-width: 60px; flex-shrink: 0;">${TextFormatter.escapeHtml(key)}:</label>
-            <input type="text" class="tool-arg-input" data-arg-name="${TextFormatter.escapeHtml(key)}" value="${TextFormatter.escapeHtml(valueStr)}" style="flex: 1; font-family: 'Courier New', monospace; font-size: 10px; background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 4px; padding: 4px 6px; color: #1f2937; transition: all 0.2s ease;" />
-          </div>
-        `;
-      }
-      argsInputsHtml += '</div>';
-    } else {
-      argsInputsHtml = '<div style="font-size: 10px; color: rgba(255, 255, 255, 0.6); font-style: italic; padding: 4px 0;">无参数</div>';
+    const promptDiv = this.messageRenderer.createToolPromptElement({
+      toolName,
+      serviceName,
+      args,
+      promptId
+    });
+    
+    if (batchId) {
+      promptDiv.setAttribute('data-batch-id', batchId);
     }
+    if (serviceId) {
+      promptDiv.setAttribute('data-service-id', serviceId);
+    }
+    promptDiv.setAttribute('data-original-query', originalQuery || '');
+    promptDiv.setAttribute('data-tool-name', toolName || '');
     
-    // 使用内联样式直接应用到元素上，不依赖外部CSS
-    promptDiv.innerHTML = `
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 8px; padding: 8px 10px; color: white; box-shadow: 0 2px 6px rgba(102, 126, 234, 0.2);">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
-          <div style="display: flex; align-items: center; gap: 6px; flex: 1;">
-            <span style="font-size: 14px;">🔧</span>
-            <span style="font-size: 11px; font-weight: 500; letter-spacing: 0.2px;"> 
-              <strong style="font-family: 'Courier New', monospace; background: rgba(255, 255, 255, 0.2); padding: 1px 4px; border-radius: 3px; font-weight: 600; font-size: 10px; margin-left: 2px;">
-                ${TextFormatter.escapeHtml(toolName)}
-              </strong>
-            </span>
-            <span style="font-size: 9px; color: rgba(255, 255, 255, 0.8); background: rgba(255, 255, 255, 0.15); padding: 1px 5px; border-radius: 10px; margin-left: 6px; font-weight: 500; letter-spacing: 0.2px;">
-              [${TextFormatter.escapeHtml(serviceName)}]
-            </span>
-          </div>
-          <button class="tool-prompt-toggle" style="background: rgba(255, 255, 255, 0.15); border: none; color: white; cursor: pointer; padding: 2px 6px; border-radius: 4px; font-size: 10px; transition: all 0.2s ease; flex-shrink: 0;">
-            <span style="display: inline-block; transition: transform 0.2s ease;">▼</span>
-          </button>
-        </div>
-        <div class="tool-prompt-details" style="max-height: 0; overflow: hidden; opacity: 0; transition: max-height 0.3s ease, opacity 0.2s ease, margin 0.3s ease; margin: 0;">
-          <div style="margin-top: 6px;">
-            <div style="font-size: 9px; font-weight: 600; color: rgba(255, 255, 255, 0.8); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">执行参数</div>
-            ${argsInputsHtml}
-          </div>
-          <div class="tool-prompt-result" style="display: none;"></div>
-        </div>
-        <div style="display: flex; gap: 6px; margin-top: 0;">
-          <button class="tool-prompt-btn tool-prompt-btn-execute" data-prompt-id="${promptId}" style="flex: 1; padding: 4px 10px; border: none; border-radius: 4px; font-size: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 3px; transition: all 0.2s ease; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background-color: #10b981; color: white;">
-            <span style="font-size: 11px;">▶</span> 执行
-          </button>
-          <button class="tool-prompt-btn tool-prompt-btn-cancel" data-prompt-id="${promptId}" style="flex: 1; padding: 4px 10px; border: none; border-radius: 4px; font-size: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 3px; transition: all 0.2s ease; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background-color: rgba(255, 255, 255, 0.2); color: white; border: 1px solid rgba(255, 255, 255, 0.3);">
-            <span style="font-size: 11px;">✕</span> 取消
-          </button>
-        </div>
-      </div>
-    `;
-    
-    messagesEl.appendChild(promptDiv);
-    this.scrollToBottom();
+    this.messageRenderer.append(promptDiv);
     
     const toggleBtn = promptDiv.querySelector('.tool-prompt-toggle');
     const detailsDiv = promptDiv.querySelector('.tool-prompt-details');
@@ -1333,44 +1126,21 @@ class AIChat {
   // }
   
   showLoading() {
-    const messagesEl = document.getElementById('messages');
-    const loadingDiv = document.createElement('div');
-    loadingDiv.className = 'message assistant';
-    loadingDiv.id = UI_ELEMENTS.LOADING_MESSAGE_ID;
-    loadingDiv.innerHTML = `
-      <div class="message-content">
-        <div class="loading">
-          <div class="loading-dot"></div>
-          <div class="loading-dot"></div>
-          <div class="loading-dot"></div>
-        </div>
-      </div>
-    `;
-    messagesEl.appendChild(loadingDiv);
-    this.scrollToBottom();
+    this.messageRenderer.showLoading();
   }
   
   hideLoading() {
-    const loadingEl = document.getElementById(UI_ELEMENTS.LOADING_MESSAGE_ID);
-    if (loadingEl) loadingEl.remove();
+    this.messageRenderer.hideLoading();
   }
   
   showError(message) {
-    const messagesEl = document.getElementById('messages');
-    const errorDiv = document.createElement('div');
-    errorDiv.className = 'error-message';
-    errorDiv.textContent = message;
-    messagesEl.appendChild(errorDiv);
-    this.scrollToBottom();
-    
-    setTimeout(() => errorDiv.remove(), TIMEOUTS.ERROR_MESSAGE);
+    this.messageRenderer.showError(message);
   }
 
   // ==================== 4. 消息发送 ====================
   
   async sendMessage() {
     const input = document.getElementById('messageInput');
-    const sendBtn = document.getElementById('sendBtn');
     const message = input.value.trim();
     
     if (!message) return;
@@ -1380,14 +1150,12 @@ class AIChat {
       return;
     }
     
-    input.disabled = true;
-    sendBtn.disabled = true;
+    this.messageRenderer.setInputState(true);
     
     // 注意：不在这里添加用户消息，而是在 buildMessages 中统一处理
     // 避免重复添加到发送给API的消息列表中
     this.appendMessage(MESSAGE_ROLES.USER, message);
-    input.value = '';
-    input.style.height = 'auto';
+    this.messageRenderer.clearInput();
     
     this.showLoading();
     
@@ -1399,9 +1167,7 @@ class AIChat {
       this.showError('发送失败: ' + error.message);
       logger.error('[Send] Error:', error);
     } finally {
-      input.disabled = false;
-      sendBtn.disabled = false;
-      input.focus();
+      this.messageRenderer.setInputState(false);
     }
   }
   
@@ -1581,6 +1347,12 @@ class AIChat {
     } else {
       // 🔧 修复：没有工具调用时，隐藏loading
       this.hideLoading();
+      
+      // 更新最后内容到ReActManager
+      if (fullContent) {
+        this.reActManager.setLastContent(fullContent);
+      }
+      
       this.tryCompleteReActRun(fullContent || response.content || '');
       // 🔒 强制检查：如果AI在文本中写了"Acting"但没有实际调用工具，必须强制调用
       if (fullContent && functions.length > 0) {
@@ -1843,12 +1615,12 @@ ${context.entities}
       }
       
       // 解析结构化建议
-      const result = this.parseSuggestionResponse(responseContent);
+      const result = this.suggestedActionsManager.parse(responseContent);
       
       if (result.suggestions && result.suggestions.length > 0) {
         logger.info('[SuggestedActions] Incident type:', result.incident_type);
         logger.info('[SuggestedActions] Generated', result.suggestions.length, 'suggestions');
-        this.displaySuggestedActions(result.suggestions, result.incident_type);
+        this.suggestedActionsManager.display(result.suggestions, result.incident_type);
       } else {
         logger.warn('[SuggestedActions] No valid suggestions generated');
       }
@@ -1931,374 +1703,6 @@ ${context.entities}
     }
     
     return context;
-  }
-  
-  /**
-   * 解析AI返回的结构化建议
-   */
-  parseSuggestionResponse(content) {
-    try {
-      logger.info('[SuggestedActions] Parsing response...');
-      
-      // 尝试提取JSON（可能被markdown代码块包裹）
-      let jsonText = content.trim();
-      
-      // 🔧 修复：移除markdown代码块
-      const codeBlockMatch = content.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-      if (codeBlockMatch) {
-        jsonText = codeBlockMatch[1].trim();
-      } else {
-        // 🔧 修复：尝试直接匹配完整的JSON对象，确保匹配到完整的JSON结构
-        // 匹配从 { 开始到 } 结束的完整JSON对象
-        const jsonMatch = content.match(/\{[\s\S]*"suggestions"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/);
-        if (jsonMatch) {
-          jsonText = jsonMatch[0].trim();
-        } else {
-          // 🔧 修复：如果匹配失败，尝试找到第一个完整的JSON对象
-          let braceCount = 0;
-          let startIdx = content.indexOf('{');
-          if (startIdx !== -1) {
-            let endIdx = startIdx;
-            for (let i = startIdx; i < content.length; i++) {
-              if (content[i] === '{') braceCount++;
-              if (content[i] === '}') braceCount--;
-              if (braceCount === 0) {
-                endIdx = i;
-                break;
-              }
-            }
-            if (endIdx > startIdx) {
-              jsonText = content.substring(startIdx, endIdx + 1).trim();
-            }
-          }
-        }
-      }
-      
-      // 🔧 修复：清理jsonText，移除可能的JSON字符串片段
-      // 如果jsonText包含不完整的JSON结构，尝试修复
-      if (jsonText.includes('"suggestions"') && !jsonText.match(/^\s*\{[\s\S]*\}\s*$/)) {
-        // 尝试找到完整的JSON对象
-        const fullJsonMatch = jsonText.match(/\{[\s\S]*\}/);
-        if (fullJsonMatch) {
-          jsonText = fullJsonMatch[0];
-        }
-      }
-      
-      const result = JSON.parse(jsonText);
-      
-      // 标准化建议格式
-      if (result.suggestions) {
-        // 🔧 修复：过滤掉无效的建议项（JSON字符串片段等）
-        result.suggestions = result.suggestions.filter(s => {
-          // 排除JSON字符串片段
-          if (typeof s === 'string') {
-            return !s.includes('"suggestions"') && 
-                   !s.includes('"action"') && 
-                   !s.includes('"priority"') &&
-                   !s.match(/^[\s]*[\[\{]/) && // 排除以 [ 或 { 开头的字符串
-                   s.trim().length > 0;
-          }
-          return s !== null && s !== undefined;
-        });
-        
-        result.suggestions = result.suggestions.map(s => {
-          // 🔧 修复：如果是字符串，先检查是否是JSON字符串片段
-          if (typeof s === 'string') {
-            // 排除JSON字符串片段
-            if (s.includes('"suggestions"') || 
-                s.includes('"action"') || 
-                s.match(/^[\s]*[\[\{]/)) {
-              logger.warn('[SuggestedActions] Skipping JSON string fragment:', s.substring(0, 50));
-              return null; // 标记为无效，后续过滤
-            }
-            return {
-              action: s,
-              priority: 'medium',
-              reason: '',
-              tool_name: ''
-            };
-          }
-          // 🔧 修复：确保action字段始终是字符串，避免显示原始对象
-          // 标准化字段名
-          let actionText = '';
-          if (typeof s === 'object' && s !== null) {
-            // 优先使用action字段，然后是text字段
-            actionText = s.action || s.text || '';
-            // 🔧 关键修复：如果action和text都不存在，尝试从对象中提取字符串
-            // 但排除不应该提取的字段：priority, reason, tool_name, toolName, incident_type 等
-            if (!actionText) {
-              const excludedKeys = ['priority', 'reason', 'tool_name', 'toolName', 'incident_type', 'id', '_id', 'type', 'status'];
-              // 尝试查找第一个字符串类型的值，但排除不应该提取的字段
-              for (const key in s) {
-                const value = s[key];
-                if (!excludedKeys.includes(key) && 
-                    typeof value === 'string' && 
-                    value.trim().length > 0 &&
-                    value.trim().length >= 5 && // 至少5个字符，避免单个单词
-                    value.trim().length < 200 && // 限制长度，避免提取过长的文本
-                    !value.match(/^(high|medium|low|true|false|\d+)$/i)) { // 排除单个单词（优先级、布尔值、数字）
-                  actionText = value;
-                  break;
-                }
-              }
-            }
-            // 如果还是找不到，使用默认文本
-            if (!actionText) {
-              logger.warn('[SuggestedActions] Could not extract action text from suggestion:', s);
-              actionText = '建议行动'; // 默认文本
-            }
-          } else if (typeof s === 'string') {
-            actionText = s;
-          } else {
-            // 其他类型，转换为字符串
-            actionText = String(s);
-          }
-          
-          return {
-            action: actionText,
-            priority: s.priority || 'medium',
-            reason: s.reason || '',
-            tool_name: s.tool_name || s.toolName || ''  // 支持工具名称
-          };
-        })
-        .filter(s => s !== null); // 🔧 修复：过滤掉无效的建议项
-        
-        // 按优先级排序
-        const priorityWeight = { high: 3, medium: 2, low: 1 };
-        result.suggestions.sort((a, b) => 
-          (priorityWeight[b.priority] || 2) - (priorityWeight[a.priority] || 2)
-        );
-      }
-      
-      logger.info('[SuggestedActions] Parsed successfully:', {
-        incident_type: result.incident_type,
-        count: result.suggestions?.length
-      });
-      
-      return result;
-      
-    } catch (error) {
-      logger.warn('[SuggestedActions] JSON parse failed, trying fallback...', error);
-      
-      // 🔧 修复：Fallback逻辑，避免提取到JSON字符串片段
-      // 按行分割，但排除JSON相关的行
-      const lines = content.split('\n')
-        .filter(line => {
-          const trimmed = line.trim();
-          // 排除JSON相关的行：包含 { } [ ] "suggestions" "action" 等JSON关键字
-          return trimmed && 
-                 !trimmed.includes('{') && 
-                 !trimmed.includes('}') && 
-                 !trimmed.includes('[') && 
-                 !trimmed.includes(']') &&
-                 !trimmed.includes('"suggestions"') &&
-                 !trimmed.includes('"action"') &&
-                 !trimmed.includes('"priority"') &&
-                 !trimmed.includes('"reason"') &&
-                 !trimmed.match(/^[\s]*["\']/); // 排除以引号开头的行（可能是JSON字符串）
-        })
-        .map(line => line.replace(/^[\d\-\*\.\s]+/, '').trim())
-        .filter(s => s.length > 5 && s.length < 60)
-        .slice(0, 3);
-      
-      return {
-        incident_type: '安全事件调查',
-        suggestions: lines.map(action => ({
-          action,
-          priority: 'medium',
-          reason: ''
-        }))
-      };
-    }
-  }
-  
-  /**
-   * 显示建议行动UI（固定在输入框上方）
-   */
-  /**
-   * 重置建议行动面板为初始状态
-   * 🔧 修复：在新对话创建或窗口重新打开时调用
-   */
-  resetSuggestedActions() {
-    const panel = document.getElementById('suggestedActionsPanel');
-    const content = document.getElementById('suggestedActionsContent');
-    
-    if (panel && content) {
-      // 隐藏面板
-      panel.style.display = 'none';
-      // 清空内容
-      content.innerHTML = '';
-      logger.info('[SuggestedActions] Panel reset to initial state');
-    }
-  }
-  
-  displaySuggestedActions(suggestions, incidentType) {
-    logger.info('[SuggestedActions] displaySuggestedActions called with:', suggestions);
-    
-    const panel = document.getElementById('suggestedActionsPanel');
-    const content = document.getElementById('suggestedActionsContent');
-    
-    if (!panel || !content) {
-      logger.error('[SuggestedActions] Panel elements not found!');
-      return;
-    }
-    
-    // 清空旧内容
-    content.innerHTML = '';
-    
-    // 如果有事件类型，显示在顶部
-    if (incidentType) {
-      const typeLabel = document.createElement('div');
-      typeLabel.className = 'incident-type-label';
-      typeLabel.style.cssText = `
-        font-size: 11px;
-        color: #6b7280;
-        padding: 4px 8px;
-        margin-bottom: 8px;
-        background: rgba(255, 255, 255, 0.6);
-        border-radius: 4px;
-        border-left: 3px solid #3b82f6;
-      `;
-      typeLabel.textContent = `📋 ${incidentType}`;
-      content.appendChild(typeLabel);
-    }
-    
-    // 优先级图标映射
-    const priorityIcons = {
-      high: '🔥',
-      medium: '⚡',
-      low: '💡'
-    };
-    
-    // 创建建议项
-    suggestions.forEach((suggestion, index) => {
-      const item = document.createElement('div');
-      item.className = 'suggestion-item';
-      
-      // 🔧 修复：确保action始终是字符串，避免显示原始对象
-      let action = '';
-      if (typeof suggestion === 'string') {
-        action = suggestion;
-      } else if (typeof suggestion === 'object' && suggestion !== null) {
-        action = suggestion.action || suggestion.text || '';
-        // 🔧 关键修复：如果action和text都不存在，尝试从对象中提取字符串
-        // 但排除不应该提取的字段：priority, reason, tool_name, toolName 等
-        if (!action) {
-          const excludedKeys = ['priority', 'reason', 'tool_name', 'toolName', 'incident_type', 'id', '_id', 'type', 'status'];
-          for (const key in suggestion) {
-            const value = suggestion[key];
-            if (!excludedKeys.includes(key) && 
-                typeof value === 'string' && 
-                value.trim().length > 0 &&
-                value.trim().length >= 5 && // 至少5个字符，避免单个单词
-                value.trim().length < 200 && // 限制长度，避免提取过长的文本
-                !value.match(/^(high|medium|low|true|false|\d+)$/i)) { // 排除单个单词（优先级、布尔值、数字）
-              action = value;
-              break;
-            }
-          }
-        }
-        // 如果还是找不到，使用默认文本
-        if (!action) {
-          logger.warn('[SuggestedActions] Could not extract action from suggestion:', suggestion);
-          action = '建议行动';
-        }
-      } else {
-        action = String(suggestion);
-      }
-      
-      const priority = (suggestion && typeof suggestion === 'object') ? (suggestion.priority || 'medium') : 'medium';
-      const reason = (suggestion && typeof suggestion === 'object') ? (suggestion.reason || '') : '';
-      const toolName = (suggestion && typeof suggestion === 'object') ? (suggestion.tool_name || suggestion.toolName || '') : '';
-      const icon = priorityIcons[priority] || '💡';
-      
-      item.setAttribute('data-suggestion', action);
-      if (toolName) {
-        item.setAttribute('data-tool-name', toolName);
-      }
-      
-      // 如果有工具名称，显示工具标识
-      const toolBadge = toolName 
-        ? `<span style="
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white;
-            font-size: 10px;
-            padding: 2px 6px;
-            border-radius: 10px;
-            margin-left: 6px;
-            font-weight: 500;
-            font-family: 'Courier New', monospace;
-          ">🔧 ${TextFormatter.escapeHtml(toolName)}</span>`
-        : '';
-      
-      item.innerHTML = `
-        <span class="suggestion-number">${icon} ${index + 1}</span>
-        <span class="suggestion-text">${TextFormatter.escapeHtml(action)}${toolBadge}</span>
-        ${reason ? `<span class="suggestion-reason" title="${TextFormatter.escapeHtml(reason)}">ℹ️</span>` : ''}
-        <span class="suggestion-arrow">→</span>
-      `;
-      
-      // 点击事件
-      item.addEventListener('click', () => {
-        this.handleSuggestionClick(action);
-      });
-      
-      content.appendChild(item);
-    });
-    
-    // 显示面板
-    panel.style.display = 'block';
-    
-    logger.info('[SuggestedActions] Panel displayed with', suggestions.length, 'suggestions');
-  }
-  
-  /**
-   * 处理建议点击
-   */
-  handleSuggestionClick(suggestion) {
-    logger.info('[SuggestedActions] Suggestion clicked:', suggestion);
-    
-    // 填充到输入框（使用正确的ID：messageInput）
-    const input = document.getElementById('messageInput');
-    
-    if (!input) {
-      logger.error('[SuggestedActions] Input element not found!');
-      return;
-    }
-    
-    logger.info('[SuggestedActions] Filling input with suggestion');
-    input.value = suggestion;
-    
-    // 自动调整高度
-    input.style.height = 'auto';
-    input.style.height = input.scrollHeight + 'px';
-    
-    // 聚焦输入框
-    input.focus();
-    
-    logger.info('[SuggestedActions] Input filled, value:', input.value);
-    
-    // 自动发送（如果配置开启）
-    if (this.config.autoSendSuggestions) {
-      logger.info('[SuggestedActions] Auto-sending suggestion');
-      setTimeout(() => {
-        this.handleSend();
-      }, 100); // 短暂延迟确保UI更新
-    }
-  }
-  
-  /**
-   * 测试方法：直接显示建议（用于调试）
-   */
-  testShowSuggestions() {
-    logger.info('[SuggestedActions] TEST: Showing test suggestions');
-    const testSuggestions = [
-      '查询该IP的历史告警记录',
-      '检查相关资产的网络流量',
-      '分析同时段其他可疑活动',
-      '验证该IP是否在黑名单中'
-    ];
-    this.displaySuggestedActions(testSuggestions);
   }
   
   // ==================== 6. 消息编辑 ====================
@@ -3398,28 +2802,15 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
   }
 
   startReActRun() {
-    this.reActState = {
-      active: true,
-      iteration: 0,
-      lastContent: '',
-      noticeShown: false
-    };
-    logger.debug('[ReAct] Run started');
+    this.reActManager.start();
   }
 
   recordReActIteration() {
-    if (!this.reActState) {
-      this.reActState = { active: false, iteration: 0 };
-    }
-    if (!this.reActState.active) {
-      this.startReActRun();
-    }
-    this.reActState.iteration = (this.reActState.iteration || 0) + 1;
-    logger.debug('[ReAct] Iteration progress:', this.reActState.iteration);
+    this.reActManager.incrementIteration();
   }
 
   isReActRunning() {
-    return !!this.reActState?.active;
+    return this.reActManager.isActive();
   }
 
   showReActCompletionNotice() {
@@ -3447,35 +2838,13 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
   }
 
   getReActFinalContent(preferredContent = '') {
-    if (preferredContent && preferredContent.trim().length > 0) {
-      return preferredContent;
-    }
-    const lastContent = this.reActState?.lastContent;
-    if (lastContent && lastContent.trim().length > 0) {
-      return lastContent;
-    }
-    return preferredContent;
+    return this.reActManager.getFinalContent(preferredContent);
   }
 
   tryCompleteReActRun(fullContent = '') {
-    if (!this.isReActRunning()) {
-      return false;
-    }
-    const hasPlainText = fullContent && fullContent.trim().length > 0;
-    const reactData = TextFormatter.parseReActFormat(fullContent);
-    const hasResponseBlock = reactData && reactData.response && reactData.response.trim().length > 0;
-    if (hasResponseBlock || (!reactData && hasPlainText)) {
-      logger.debug('[ReAct] Run completed after iterations:', this.reActState.iteration || 0);
-      this.reActState.active = false;
-      this.reActState.iteration = 0;
-      this.reActState.lastContent = fullContent || '';
-      if (!this.reActState.noticeShown) {
-        this.showReActCompletionNotice();
-        this.reActState.noticeShown = true;
-      }
-      return true;
-    }
-    return false;
+    return this.reActManager.tryComplete(fullContent, () => {
+      this.showReActCompletionNotice();
+    });
   }
   
   /**
@@ -3588,10 +2957,6 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
         
         // 如果有多个工具（自动+手动），显示批量提示卡片
         // if (totalCount > 1) {
-        //   const messagesEl = document.getElementById('messages');
-        //   const batchTipCard = document.createElement('div');
-        //   batchTipCard.id = `batch-tip-${batchId}`;
-        //   batchTipCard.className = 'batch-tip-card';
           
         //   let tipText = `需要执行 ${totalCount} 个工具`;
         //   if (autoExecuteTools.length > 0 && manualConfirmTools.length > 0) {
@@ -4886,63 +4251,13 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
    * 🔧 新增：工具结果缓存机制
    */
   addToolResultToCache(conversationId, toolResult) {
-    if (!conversationId) {
-      logger.warn('[Cache] Cannot add tool result: conversationId is missing');
-      return;
-    }
-    
-    // 确保缓存存在
-    if (!this.toolResultsCache[conversationId]) {
-      this.toolResultsCache[conversationId] = [];
-    }
-    
-    // 🔧 修复：检查是否已存在相同的工具结果
-    // 优先通过toolCallId比较（最准确），如果没有toolCallId，则通过toolName+args比较
-    // 注意：如果toolCallId不同，即使toolName+args相同，也应该都保存（可能是不同轮次的调用）
-    const existingIndex = this.toolResultsCache[conversationId].findIndex(tr => {
-      // 优先使用toolCallId比较（最准确）
-      if (tr.toolCallId && toolResult.toolCallId && tr.toolCallId === toolResult.toolCallId) {
-        return true;
-      }
-      // 如果都没有toolCallId，通过toolName+args比较
-      // 注意：只有在都没有toolCallId的情况下才使用这个逻辑
-      if (!tr.toolCallId && !toolResult.toolCallId && tr.toolName === toolResult.toolName) {
-        const trArgs = JSON.stringify(tr.args || {});
-        const resultArgs = JSON.stringify(toolResult.args || {});
-        return trArgs === resultArgs;
-      }
-      return false;
-    });
-    
-    if (existingIndex >= 0) {
-      // 更新已存在的结果（相同toolCallId或相同toolName+args）
-      this.toolResultsCache[conversationId][existingIndex] = toolResult;
-      logger.debug('[Cache] Updated existing tool result in cache:', toolResult.toolName, 'toolCallId:', toolResult.toolCallId);
-    } else {
-      // 添加新结果（不同的toolCallId或不同的toolName+args）
-      this.toolResultsCache[conversationId].push(toolResult);
-      logger.debug('[Cache] Added tool result to cache:', toolResult.toolName, 'toolCallId:', toolResult.toolCallId, 'Total:', this.toolResultsCache[conversationId].length);
-    }
+    if (!conversationId) return;
+    this.conversationManager.addToolResult(conversationId, toolResult);
   }
   
-  /**
-   * 从缓存中获取所有工具结果
-   * 🔧 新增：工具结果缓存机制
-   */
   getToolResultsFromCache(conversationId) {
-    if (!conversationId) {
-      logger.warn('[Cache] Cannot get tool results: conversationId is missing');
-      return [];
-    }
-    
-    if (!this.toolResultsCache[conversationId]) {
-      logger.debug('[Cache] No cache found for conversation:', conversationId);
-      return [];
-    }
-    
-    const cachedResults = this.toolResultsCache[conversationId];
-    logger.info('[Cache] Retrieved', cachedResults.length, 'tool results from cache for conversation:', conversationId);
-    return cachedResults;
+    if (!conversationId) return [];
+    return this.conversationManager.getToolResults(conversationId);
   }
   
   /**
@@ -5392,8 +4707,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
   // ==================== 9. UI辅助 ====================
 
   scrollToBottom() {
-    const messagesEl = document.getElementById('messages');
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    this.messageRenderer.scrollToBottom();
   }
   
   // ==================== 10. TheHive 集成 ====================
@@ -5500,7 +4814,7 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       priority: index === 0 ? 'high' : (index === 1 ? 'medium' : 'low'),
       source: 'thehive'
     }));
-    this.displaySuggestedActions(mapped, 'TheHive 建议');
+    this.suggestedActionsManager.display(mapped, 'TheHive 建议');
   }
 
   

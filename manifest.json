@@ -45,7 +45,9 @@
         "sidebar.css",
         "sidebar.js",
         "src/config/*.js",
+        "src/core/*.js",
         "src/services/*.js",
+        "src/ui/*.js",
         "src/utils/*.js"
       ],
       "matches": ["<all_urls>"]
