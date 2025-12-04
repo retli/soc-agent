@@ -5210,6 +5210,46 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       return lines.join('\n').trim();
     };
     
+    const extractSectionFromMarker = () => {
+      const markerRegex = /【\s*[^\n【】]*?(?:调查)?建议[^\n【】]*】/i;
+      const markerMatch = normalized.match(markerRegex);
+      if (!markerMatch) return '';
+      const startIndex = markerMatch.index + markerMatch[0].length;
+      const rest = normalized.substring(startIndex);
+      const lines = rest.split('\n');
+      const captured = [];
+      let blankCount = 0;
+      
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) {
+          if (captured.length === 0) continue;
+          blankCount += 1;
+          if (blankCount >= 2) break;
+          continue;
+        }
+        blankCount = 0;
+        
+        if (
+          sectionHeaderRegex.test(trimmed) ||
+          isPureHeaderText(trimmed) ||
+          /^【/.test(trimmed) ||
+          /^===/.test(trimmed) ||
+          /^---/.test(trimmed)
+        ) {
+          break;
+        }
+        
+        if (decorationLineRegex.test(trimmed)) {
+          continue;
+        }
+        
+        captured.push(trimmed);
+      }
+      
+      return captured.join('\n').trim();
+    };
+    
     const extractSectionByLineSweep = () => {
       const lines = normalized.split('\n');
       const captured = [];
@@ -5322,6 +5362,9 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
     if (!suggestionSection) {
       suggestionSection = cleanSuggestionSection(extractSectionByRegex());
     }
+    if (!suggestionSection) {
+      suggestionSection = cleanSuggestionSection(extractSectionFromMarker());
+    }
     
     if (!suggestionSection || /^暂无/i.test(suggestionSection)) {
       return [];
@@ -5345,14 +5388,18 @@ Response: 综合威胁情报、资产信息和历史事件，给出完整的安�
       .map(seg => seg.replace(/^\s*\d+\s*[\.、\)\）]/, '').trim())
       .filter(Boolean);
     
-    if (segments.length === 0) {
-      return suggestionSection
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 4 && !/^建议/.test(line) && !isPureHeaderText(line));
+    let finalSegments = filteredSegments(segments);
+    
+    if (finalSegments.length === 0) {
+      finalSegments = filteredSegments(
+        suggestionSection
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line.length > 4 && !/^建议/.test(line))
+      );
     }
     
-    return filteredSegments(segments);
+    return finalSegments;
   }
 
   getDefaultSecurityPrompts() {
