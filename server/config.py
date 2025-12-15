@@ -3,10 +3,17 @@
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import BaseSettings, Field, HttpUrl
+from pydantic import Field, HttpUrl
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
     api_base: HttpUrl = Field(..., env="API_BASE")
     api_key: str = Field(..., env="API_KEY")
     authorization: Optional[str] = Field(None, env="AUTHORIZATION")
@@ -22,10 +29,6 @@ class Settings(BaseSettings):
 
     # MCP
     mcp_timeout_ms: int = Field(45000, env="MCP_TIMEOUT_MS")
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 @lru_cache()

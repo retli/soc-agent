@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import Any, AsyncIterator, Dict
 
-from langchain.callbacks.base import AsyncCallbackHandler
+from langchain_core.callbacks import AsyncCallbackHandler
 
 
 class SSEQueue:
