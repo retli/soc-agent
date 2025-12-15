@@ -53,6 +53,11 @@ export class AIAPIService {
    * Send chat completion request
    */
   async sendMessage(messages, options = {}) {
+    const backendUrl = this.config.backendUrl || this.config.apiUrlBackend || this.config.api?.backendUrl || DEFAULT_CONFIG.api.backendUrl;
+    if (backendUrl) {
+      return this.sendMessageViaBackend(messages, options, backendUrl);
+    }
+
     const useStream = options.stream !== undefined ? options.stream : (this.config.stream || DEFAULT_CONFIG.api.stream);
     const timeoutMs = typeof options.timeout === 'number'
       ? options.timeout
@@ -219,6 +224,161 @@ export class AIAPIService {
       logger.error('[API] Failed to parse response:', parseError);
       throw new Error('Failed to parse API response: ' + parseError.message);
     }
+  }
+
+  /**
+   * Backend mode: call FastAPI gateway (/chat + /chat/stream/{sessionId})
+   */
+  async sendMessageViaBackend(messages, options = {}, backendUrl) {
+    const timeoutMs = typeof options.timeout === 'number'
+      ? options.timeout
+      : (this.config.timeout || this.config.apiTimeout || DEFAULT_CONFIG.api.timeout || DEV_CONFIG.apiTimeout || 60000);
+    const streamTimeoutMs = typeof options.streamTimeout === 'number'
+      ? options.streamTimeout
+      : (this.config.streamTimeout || DEFAULT_CONFIG.api.streamTimeout || timeoutMs);
+
+    const payload = {
+      session_id: options.sessionId,
+      messages,
+      system_prompt: options.systemPrompt || options.systemPromptOverride,
+      enabled_tools: options.enabledTools,
+      function_call_mode: options.functionCallMode
+    };
+
+    logger.info('[API] Backend chat start:', backendUrl, payload);
+    const startResp = await fetch(`${backendUrl}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!startResp.ok) {
+      const text = await startResp.text();
+      throw new Error(`Backend chat failed: ${startResp.status} ${text}`);
+    }
+    const { session_id } = await startResp.json();
+    if (!session_id) {
+      throw new Error('Backend did not return session_id');
+    }
+
+    const streamUrl = `${backendUrl}/chat/stream/${session_id}`;
+    logger.info('[API] Backend stream:', streamUrl);
+
+    const es = new EventSource(streamUrl);
+    const queue = [];
+    let resolver = null;
+    let done = false;
+    let toolCalls = null;
+
+    const enqueue = (item) => {
+      if (done) return;
+      if (resolver) {
+        resolver({ value: item, done: false });
+        resolver = null;
+      } else {
+        queue.push(item);
+      }
+    };
+
+    const close = () => {
+      if (done) return;
+      done = true;
+      es.close();
+      if (resolver) {
+        resolver({ done: true });
+        resolver = null;
+      }
+    };
+
+    es.addEventListener('token', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        enqueue({ type: 'token', content: data.content || '' });
+      } catch (e) {
+        logger.warn('[API] Failed to parse token event', e);
+      }
+    });
+
+    es.addEventListener('assistant', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.tool_calls) {
+          toolCalls = data.tool_calls;
+        }
+      } catch (e) {
+        logger.warn('[API] Failed to parse assistant event', e);
+      }
+    });
+
+    es.addEventListener('tool', (event) => {
+      // For now, surface tool events via logger; UI may extend to display
+      try {
+        const data = JSON.parse(event.data);
+        logger.info('[API] Tool event:', data);
+      } catch (e) {
+        logger.warn('[API] Failed to parse tool event', e);
+      }
+    });
+
+    es.addEventListener('final', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        enqueue({ type: 'final', content: data.content || '' });
+      } catch (e) {
+        enqueue({ type: 'final', content: '' });
+      } finally {
+        close();
+      }
+    });
+
+    es.addEventListener('error', (event) => {
+      enqueue({ type: 'error', message: event?.message || 'stream error' });
+      close();
+    });
+
+    const inactivityTimer = setTimeout(() => {
+      enqueue({ type: 'error', message: 'stream timeout' });
+      close();
+    }, streamTimeoutMs || 60000);
+
+    const result = {
+      stream: true,
+      tool_calls: null,
+      cancel: () => {
+        clearTimeout(inactivityTimer);
+        close();
+      },
+      async *readStream() {
+        try {
+          while (true) {
+            if (queue.length === 0) {
+              const next = await new Promise((resolve) => {
+                resolver = resolve;
+              });
+              if (!next || next.done) {
+                break;
+              }
+              queue.push(next.value);
+            }
+
+            const item = queue.shift();
+            if (!item) continue;
+            if (item.type === 'token') {
+              yield item.content;
+            } else if (item.type === 'error') {
+              throw new Error(item.message || 'stream error');
+            } else if (item.type === 'final') {
+              break;
+            }
+          }
+        } finally {
+          clearTimeout(inactivityTimer);
+          result.tool_calls = toolCalls;
+          close();
+        }
+      }
+    };
+
+    return result;
   }
 
   /**

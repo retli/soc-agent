@@ -9,7 +9,8 @@
 export const DEFAULT_CONFIG = {
   // AI API 配置
   api: {
-    url: 'https://api.example.com/v1',  // API服务地址（示例值，需在设置中配置）
+    url: 'https://api.example.com/v1',  // 直连模型地址（兼容旧路径）
+    backendUrl: 'http://localhost:8000', // 后端网关地址（FastAPI/LangGraph）
     key: '',  // API密钥（用户需要在设置页面填写）
     authorization: '',  // Authorization 认证参数（示例：ACCESSCODE XXXXX）
     model: 'gpt-4o-mini',  // 默认使用的AI模型名称（示例值，可在设置中修改）

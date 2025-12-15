@@ -38,6 +38,7 @@ class OptionsManager {
     
     logger.info('[Options] Loaded config:', config);
     
+    document.getElementById('backendUrl').value = config.backendUrl || config.api?.backendUrl || DEFAULT_CONFIG.api.backendUrl || '';
     document.getElementById('apiUrl').value = config.apiUrl;
     document.getElementById('apiKey').value = config.apiKey;
     document.getElementById('authorization').value = config.authorization || '';
@@ -121,6 +122,7 @@ class OptionsManager {
   
   async saveSettings() {
     const config = {
+      backendUrl: document.getElementById('backendUrl').value.trim(),
       apiUrl: document.getElementById('apiUrl').value.trim(),
       apiKey: document.getElementById('apiKey').value.trim(),
       authorization: document.getElementById('authorization').value.trim(),
@@ -152,6 +154,15 @@ class OptionsManager {
     logger.info('[Options] Settings saved');
     
     this.showSuccess();
+
+    // 同步 MCP 服务到后端（如果配置了后端）
+    if (config.backendUrl) {
+      try {
+        await this.syncMCPServicesToBackend(config.backendUrl);
+      } catch (err) {
+        logger.warn('[Options] Sync MCP services to backend failed:', err);
+      }
+    }
   }
   
   showSuccess() {
@@ -178,14 +189,15 @@ class OptionsManager {
     const resultEl = document.getElementById('apiTestResult');
     const btn = document.getElementById('testApiBtn');
     
+    const backendUrl = document.getElementById('backendUrl').value.trim();
     const apiUrl = document.getElementById('apiUrl').value.trim();
     const apiKey = document.getElementById('apiKey').value.trim();
     const authorization = document.getElementById('authorization').value.trim();
     const model = document.getElementById('modelName').value.trim() || DEFAULT_CONFIG.api.model;
     
-    if (!apiUrl || !apiKey) {
+    if (!backendUrl && (!apiUrl || !apiKey)) {
       resultEl.style.color = '#991b1b';
-      resultEl.textContent = '请先填写 API 地址和 API Key';
+      resultEl.textContent = '请先填写后端地址，或填写直连 API 地址与 API Key';
       return;
     }
     
@@ -194,15 +206,23 @@ class OptionsManager {
     resultEl.textContent = '';
     
     try {
-      const apiService = new AIAPIService({ apiUrl, apiKey, authorization, model });
-      const result = await apiService.testConnection();
-      
-      if (result.success) {
+      if (backendUrl) {
+        const resp = await fetch(`${backendUrl}/config`);
+        if (!resp.ok) throw new Error(`后端返回 ${resp.status}`);
+        const data = await resp.json();
         resultEl.style.color = '#065f46';
-        resultEl.textContent = `✅ 连接成功！响应: ${result.message}`;
+        resultEl.textContent = `✅ 后端可用，模型: ${data.model || 'N/A'}`;
       } else {
-        resultEl.style.color = '#991b1b';
-        resultEl.textContent = `连接失败: ${result.error}`;
+        const apiService = new AIAPIService({ apiUrl, apiKey, authorization, model });
+        const result = await apiService.testConnection();
+        
+        if (result.success) {
+          resultEl.style.color = '#065f46';
+          resultEl.textContent = `✅ 连接成功！响应: ${result.message}`;
+        } else {
+          resultEl.style.color = '#991b1b';
+          resultEl.textContent = `连接失败: ${result.error}`;
+        }
       }
       
     } catch (error) {
@@ -212,6 +232,23 @@ class OptionsManager {
     } finally {
       btn.disabled = false;
       btn.textContent = '测试 API 连接';
+    }
+  }
+
+  async syncMCPServicesToBackend(backendUrl) {
+    for (const s of this.mcpServices) {
+      const payload = {
+        id: s.id,
+        name: s.name,
+        sse_url: s.url || s.sse_url || '',
+        method: s.method || 'GET',
+        enabled: s.enabled !== false
+      };
+      await fetch(`${backendUrl}/mcp/services`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
     }
   }
   
